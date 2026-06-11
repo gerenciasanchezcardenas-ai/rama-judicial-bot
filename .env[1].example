@@ -1,0 +1,11 @@
+# ============================================================
+# SÁNCHEZ & CÁRDENAS CONSULTING S.A.S.
+# Variables de entorno — copiar este archivo como .env
+# ============================================================
+
+# Puerto del servidor (por defecto 3000)
+PORT=3000
+
+# Token secreto para proteger el webhook (invente uno seguro)
+# Ejemplo: SC_BOT_2024_XK9P
+WEBHOOK_SECRET=CAMBIE_ESTO_POR_UN_TOKEN_SECRETO
