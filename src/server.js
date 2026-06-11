@@ -1,55 +1,85 @@
 require("dotenv").config();
 const express = require("express");
+const axios = require("axios");
 const { consultarPorNombre, consultarPorRadicado } = require("./ramaJudicial");
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.D360_API_KEY;
+const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
+
 const sesiones = {};
 
-app.post("/webhook/twilio", async (req, res) => {
-  const mensaje = (req.body.Body || "").trim();
-  const telefono = req.body.From || "";
-  const sesion = sesiones[telefono] || { paso: "inicio" };
-  let respuesta = "";
+async function enviarMensaje(telefono, texto) {
+  await axios.post(
+    API_URL,
+    {
+      messaging_product: "whatsapp",
+      to: telefono,
+      type: "text",
+      text: { body: texto },
+    },
+    { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
+  );
+}
 
-  if (sesion.paso === "inicio") {
-    respuesta = "¡Hola! 👋 Soy el asistente de *Sánchez & Cárdenas Consulting*.\n\n¿Desea consultar si tiene procesos judiciales activos? Responda *SÍ* para continuar.";
-    sesiones[telefono] = { paso: "esperando_confirmacion" };
-  } else if (sesion.paso === "esperando_confirmacion") {
-    if (mensaje.toLowerCase().includes("si") || mensaje.toLowerCase().includes("sí")) {
-      respuesta = "Por favor indíquenos el *nombre completo* o *número de cédula* a consultar.";
-      sesiones[telefono] = { paso: "esperando_nombre" };
-    } else {
-      respuesta = "Entendido. Estamos disponibles cuando lo necesite.\n\n_Sánchez & Cárdenas Consulting_\n📞 +57 313 829 1633";
-      delete sesiones[telefono];
-    }
-  } else if (sesion.paso === "esperando_nombre") {
-    sesiones[telefono] = { paso: "inicio" };
-    res.set("Content-Type", "text/xml");
-    res.send(`<Response><Message>⏳ Consultando en la Rama Judicial... un momento.</Message></Response>`);
-    try {
+app.post("/webhook", async (req, res) => {
+  res.json({ status: "ok" }); // responder 200 inmediatamente
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const mensaje_obj = value?.messages?.[0];
+
+    if (!mensaje_obj || mensaje_obj.type !== "text") return;
+
+    const telefono = mensaje_obj.from;
+    const mensaje = mensaje_obj.text.body.trim();
+    const sesion = sesiones[telefono] || { paso: "inicio" };
+
+    let respuesta = "";
+
+    if (sesion.paso === "inicio") {
+      respuesta = "¡Hola! 👋 Soy el asistente de *Sánchez & Cárdenas Consulting*.\n\n¿Desea consultar si tiene procesos judiciales activos? Responda *SÍ* para continuar.";
+      sesiones[telefono] = { paso: "esperando_confirmacion" };
+
+    } else if (sesion.paso === "esperando_confirmacion") {
+      if (mensaje.toLowerCase().includes("sí") || mensaje.toLowerCase().includes("si")) {
+        respuesta = "Por favor ingrese su *nombre completo* o el *número de radicado* del proceso.";
+        sesiones[telefono] = { paso: "esperando_nombre" };
+      } else {
+        respuesta = "Entendido. Si necesita consultar en otro momento, escríbame.";
+        sesiones[telefono] = { paso: "inicio" };
+      }
+
+    } else if (sesion.paso === "esperando_nombre") {
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
+
       const esNum = /^\d{6,15}$/.test(mensaje.replace(/\s/g, ""));
-      const resultado = esNum ? await consultarPorRadicado(mensaje) : await consultarPorNombre(mensaje);
-      const axios = require("axios");
-      await axios.post(
-        `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
-        new URLSearchParams({ From: process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886", To: telefono, Body: resultado.mensaje }),
-        { auth: { username: process.env.TWILIO_ACCOUNT_SID, password: process.env.TWILIO_AUTH_TOKEN } }
-      );
-    } catch (e) { console.error("Error:", e.message); }
-    return;
-  } else {
-    sesiones[telefono] = { paso: "inicio" };
-    respuesta = "Escriba cualquier mensaje para iniciar la consulta.";
-  }
+      const resultado = esNum
+        ? await consultarPorRadicado(mensaje)
+        : await consultarPorNombre(mensaje);
 
-  res.set("Content-Type", "text/xml");
-  res.send(`<Response><Message>${respuesta}</Message></Response>`);
+      respuesta = resultado.mensaje;
+
+    } else {
+      sesiones[telefono] = { paso: "inicio" };
+      respuesta = "Escriba cualquier mensaje para iniciar la consulta.";
+    }
+
+    if (respuesta) await enviarMensaje(telefono, respuesta);
+
+  } catch (e) {
+    console.error("Error en webhook:", e.message);
+  }
 });
 
-app.get("/health", (req, res) => res.json({ estado: "OK", servicio: "Sánchez & Cárdenas — Bot Rama Judicial", hora: new Date().toISOString() }));
+app.get("/health", (req, res) =>
+  res.json({ estado: "OK", servicio: "Sánchez & Cárdenas – Bot Rama Judicial", hora: new Date().toISOString() })
+);
 
 app.listen(PORT, () => console.log(`✅ Servidor activo en http://localhost:${PORT}`));
