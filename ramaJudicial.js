@@ -1,210 +1,104 @@
-/**
- * ============================================================
- * SÁNCHEZ & CÁRDENAS CONSULTING S.A.S.
- * Módulo de consulta automática - Rama Judicial Colombia
- * ============================================================
- *
- * Consulta el portal oficial:
- * https://consultaprocesos.ramajudicial.gov.co
- *
- * Modos de búsqueda:
- *   1. Por nombre o razón social
- *   2. Por número de radicado
- * ============================================================
- */
-
 const axios = require("axios");
 
-// ── Configuración base ────────────────────────────────────────
-const BASE_URL =
-  "https://consultaprocesos.ramajudicial.gov.co:448/api/v2";
+const BASE_URL = "https://consultaprocesos.ramajudicial.gov.co:448/api/v2";
 
 const HEADERS = {
   "Content-Type": "application/json",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-  "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
-  "Accept-Encoding": "gzip, deflate, br",
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-  "Referer": "https://consultaprocesos.ramajudicial.gov.co/Procesos/Index",
+  "Accept": "application/json",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+  "Referer": "https://consultaprocesos.ramajudicial.gov.co/",
   "Origin": "https://consultaprocesos.ramajudicial.gov.co",
-  "Connection": "keep-alive",
-  "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-  "sec-ch-ua-mobile": "?0",
-  "sec-ch-ua-platform": '"Windows"',
-  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Site": "same-site",
   "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
-};
-  "Content-Type": "application/json",
-  Accept: "application/json",
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-  Referer: "https://consultaprocesos.ramajudicial.gov.co/",
-  Origin: "https://consultaprocesos.ramajudicial.gov.co",
+  "Sec-Fetch-Dest": "empty",
 };
 
-// ── Función principal: buscar por nombre ─────────────────────
 async function consultarPorNombre(nombre, tipoPersona = "nat") {
   try {
     const url = `${BASE_URL}/Procesos/Consulta/NombreRazonSocial`;
-
     const params = {
-  nombre: nombre.trim().toUpperCase(),
-  tipoPersona: tipoPersona,
-  SoloActivos: false,
-  codificacionDespacho: "",
-  pagina: 1,
-};
-
-    const response = await axios.get(url, {
-      params,
-      headers: HEADERS,
-        timeout: 15000,
-      });
-
-      return procesarRespuesta(response.data, "nombre", nombre);
-    } catch (error) {
+      nombre: nombre.trim().toUpperCase(),
+      tipoPersona: tipoPersona,
+      SoloActivos: false,
+      codificacionDespacho: "",
+      pagina: 1,
+    };
+    const response = await axios.get(url, { params, headers: HEADERS, timeout: 15000 });
+    return procesarRespuesta(response.data, nombre);
+  } catch (error) {
+    console.error("Error consultarPorNombre:", error.message);
     return manejarError(error);
   }
 }
 
-// ── Función principal: buscar por radicado ───────────────────
 async function consultarPorRadicado(radicado) {
   try {
-    const url = `${BASE_URL}/Proceso/Consulta/NumeroRadicacion`;
-
+    const url = `${BASE_URL}/Procesos/Consulta/NumeroRadicacion`;
     const params = {
       numero: radicado.trim().replace(/\s/g, ""),
       SoloActivos: false,
       pagina: 1,
     };
-
-    const response = await axios.get(url, {
-      params,
-      headers: HEADERS,
-      timeout: 15000,
-    });
-
-    return procesarRespuesta(response.data, "radicado", radicado);
+    const response = await axios.get(url, { params, headers: HEADERS, timeout: 15000 });
+    return procesarRespuesta(response.data, radicado);
   } catch (error) {
+    console.error("Error consultarPorRadicado:", error.message);
     return manejarError(error);
   }
 }
 
-// ── Procesar y estructurar la respuesta ──────────────────────
-function procesarRespuesta(data, tipoBusqueda, termino) {
-  // La API devuelve: { procesos: [...], cantidadRegistros: N }
-  const procesos = data?.procesos || data?.Procesos || [];
-  const total =
-    data?.cantidadRegistros ||
-    data?.CantidadRegistros ||
-    procesos.length;
-
-  if (!procesos || procesos.length === 0) {
+function procesarRespuesta(data, termino) {
+  if (data && data.StatusCode === 400) {
     return {
-      exito: true,
-      encontrado: false,
-      total: 0,
-      termino,
-      tipoBusqueda,
-      mensaje: formatearMensajeVacio(termino),
-      procesos: [],
+      tieneProcesos: true,
+      cantidad: 1000,
+      detalle: "Se encontraron mas de 1.000 procesos para " + termino + ". Por favor ingrese el nombre completo.",
+      mensaje: "",
     };
   }
 
-  const procesosFormateados = procesos.slice(0, 5).map((p) => ({
-    radicado: p.llaveProceso || p.idProceso || "N/D",
-    despacho: p.despacho || "N/D",
-    ponente: p.ponente || "N/D",
-    tipoProceso: p.tipoProceso || "N/D",
-    fechaUltimaActuacion: p.fechaUltimaActuacion || "N/D",
-    sujetosProcesales: p.sujetosProcesales || "N/D",
-  }));
+  const cantidad = (data && data.paginacion && data.paginacion.cantidadRegistros) ? data.paginacion.cantidadRegistros : 0;
+  const procesos = (data && data.procesos) ? data.procesos : [];
 
-  return {
-    exito: true,
-    encontrado: true,
-    total,
-    termino,
-    tipoBusqueda,
-    mensaje: formatearMensajeResultados(termino, total, procesosFormateados),
-    procesos: procesosFormateados,
-    hayMas: total > 5,
-  };
-}
-
-// ── Formatear mensaje para WhatsApp (sin procesos) ───────────
-function formatearMensajeVacio(termino) {
-  return (
-    `✅ *Consulta Rama Judicial*\n\n` +
-    `No encontramos procesos judiciales activos registrados a nombre de:\n` +
-    `*${termino}*\n\n` +
-    `Si considera que esta información no es correcta o desea una revisión más detallada, nuestros abogados pueden orientarle.\n\n` +
-    `_Sánchez & Cárdenas Consulting S.A.S._\n` +
-    `📞 +57 313 829 1633\n` +
-    `🌐 sanchezcardenasconsulting.com`
-  );
-}
-
-// ── Formatear mensaje para WhatsApp (con procesos) ───────────
-function formatearMensajeResultados(termino, total, procesos) {
-  let msg =
-    `⚠️ *Consulta Rama Judicial*\n\n` +
-    `Encontramos *${total} proceso(s)* registrado(s) para:\n` +
-    `*${termino}*\n\n`;
-
-  procesos.forEach((p, i) => {
-    msg += `📋 *Proceso ${i + 1}*\n`;
-    msg += `• Radicado: ${p.radicado}\n`;
-    msg += `• Despacho: ${p.despacho}\n`;
-    msg += `• Tipo: ${p.tipoProceso}\n`;
-    msg += `• Última actuación: ${p.fechaUltimaActuacion}\n\n`;
-  });
-
-  if (total > 5) {
-    msg += `_...y ${total - 5} proceso(s) más._\n\n`;
+  if (cantidad === 0 || procesos.length === 0) {
+    return {
+      tieneProcesos: false,
+      cantidad: 0,
+      detalle: "",
+      mensaje: "No se encontraron procesos registrados para " + termino + " en la Rama Judicial.",
+    };
   }
 
-  msg +=
-    `Le recomendamos revisar esto con un abogado a la brevedad.\n\n` +
-    `¿Desea que uno de nuestros especialistas lo contacte?\n` +
-    `Responda *SÍ* para agendar una consulta.\n\n` +
-    `_Sánchez & Cárdenas Consulting S.A.S._\n` +
-    `📞 +57 313 829 1633\n` +
-    `🌐 sanchezcardenasconsulting.com`;
+  let detalle = "Resultados para " + termino + ":\n\n";
+  const lista = procesos.slice(0, 5);
+  for (let i = 0; i < lista.length; i++) {
+    const p = lista[i];
+    detalle += (i + 1) + ". Radicado: " + (p.llaveProceso || "N/A") + "\n";
+    detalle += "Despacho: " + (p.despacho || "N/A") + "\n";
+    detalle += "Tipo: " + (p.tipoProceso || "N/A") + "\n";
+    detalle += "Fecha: " + ((p.fechaProceso || "").substring(0, 10) || "N/A") + "\n\n";
+  }
 
-  return msg;
-}
-
-// ── Manejo de errores ─────────────────────────────────────────
-function manejarError(error) {
-  const esTimeout =
-    error.code === "ECONNABORTED" || error.message.includes("timeout");
-  const esConexion =
-    error.code === "ENOTFOUND" || error.code === "ECONNREFUSED";
-
-  let mensajeUsuario =
-    `⚠️ En este momento el sistema de la Rama Judicial presenta dificultades técnicas.\n\n` +
-    `Por favor intente nuevamente en unos minutos o contáctenos directamente:\n\n` +
-    `📞 +57 313 829 1633\n` +
-    `🌐 sanchezcardenasconsulting.com`;
+  if (cantidad > 5) {
+    detalle += "...y " + (cantidad - 5) + " proceso(s) mas. Consulte en: https://consultaprocesos.ramajudicial.gov.co";
+  }
 
   return {
-    exito: false,
-    encontrado: false,
-    error: esTimeout
-      ? "TIMEOUT"
-      : esConexion
-      ? "CONEXION"
-      : "DESCONOCIDO",
-    detalle: error.message,
-    mensaje: mensajeUsuario,
-    procesos: [],
+    tieneProcesos: true,
+    cantidad: cantidad,
+    detalle: detalle,
+    mensaje: "",
   };
 }
 
-// ── Exportar funciones ────────────────────────────────────────
-module.exports = {
-  consultarPorNombre,
-  consultarPorRadicado,
-};
+function manejarError(error) {
+  console.error("Status error:", error.message);
+  return {
+    tieneProcesos: false,
+    cantidad: 0,
+    detalle: "",
+    mensaje: "El sistema de Rama Judicial presenta dificultades tecnicas. Por favor intente nuevamente o contactenos: +57 313 829 1633",
+  };
+}
+
+module.exports = { consultarPorNombre, consultarPorRadicado };
