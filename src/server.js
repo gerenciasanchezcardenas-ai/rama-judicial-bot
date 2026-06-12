@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
 const { consultarPorNombre, consultarPorRadicado } = require("./ramaJudicial");
 
 const app = express();
@@ -9,20 +10,38 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.D360_API_KEY;
 const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
+const WOMPI_PRIVATE_KEY = process.env.WOMPI_PRIVATE_KEY;
+const WOMPI_INTEGRITY_KEY = process.env.WOMPI_INTEGRITY_KEY;
+const WOMPI_EVENTS_SECRET = process.env.WOMPI_EVENTS_SECRET;
+const PRECIO_CONSULTA = 2000000; // $20.000 COP en centavos
 
 const sesiones = {};
+const pagosEsperados = {}; // { referencia: { telefono, tipoConsulta, tipoPersona, termino } }
 
 async function enviarMensaje(telefono, texto) {
-  await axios.post(
-    API_URL,
-    {
-      messaging_product: "whatsapp",
-      to: telefono,
-      type: "text",
-      text: { body: texto },
-    },
-    { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
-  );
+  try {
+    await axios.post(
+      API_URL,
+      {
+        messaging_product: "whatsapp",
+        to: telefono,
+        type: "text",
+        text: { body: texto },
+      },
+      { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
+    );
+  } catch (e) {
+    console.error("Error enviando mensaje:", e.message);
+  }
+}
+
+async function crearEnlacePago(telefono, referencia) {
+  const integrity = crypto
+    .createHash("sha256")
+    .update(`${referencia}${PRECIO_CONSULTA}COP${WOMPI_INTEGRITY_KEY}`)
+    .digest("hex");
+
+  return `https://checkout.wompi.co/p/?public-key=${process.env.WOMPI_PUBLIC_KEY}&currency=COP&amount-in-cents=${PRECIO_CONSULTA}&reference=${referencia}&signature:integrity=${integrity}`;
 }
 
 app.post("/webhook", async (req, res) => {
@@ -57,7 +76,7 @@ app.post("/webhook", async (req, res) => {
         sesiones[telefono] = { paso: "esperando_tipo_persona" };
       } else if (mensaje === "2") {
         respuesta = "Por favor ingrese el *número de radicado* del proceso:";
-        sesiones[telefono] = { paso: "esperando_radicado" };
+        sesiones[telefono] = { paso: "esperando_radicado_previo" };
       } else {
         respuesta = "Por favor responda *1* para Nombre o *2* para Radicado.";
       }
@@ -65,26 +84,43 @@ app.post("/webhook", async (req, res) => {
     } else if (sesion.paso === "esperando_tipo_persona") {
       if (mensaje === "1") {
         respuesta = "Por favor ingrese el *nombre completo* de la persona natural:";
-        sesiones[telefono] = { paso: "esperando_nombre", tipoPersona: "nat" };
+        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "nat" };
       } else if (mensaje === "2") {
         respuesta = "Por favor ingrese la *razón social* de la empresa:";
-        sesiones[telefono] = { paso: "esperando_nombre", tipoPersona: "jur" };
+        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "jur" };
       } else {
         respuesta = "Por favor responda *1* para Natural o *2* para Jurídica.";
       }
 
-    } else if (sesion.paso === "esperando_nombre") {
-      const tipoPersona = sesion.tipoPersona || "nat";
-      sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
-      const resultado = await consultarPorNombre(mensaje, tipoPersona);
-      respuesta = resultado.mensaje;
+    } else if (sesion.paso === "esperando_nombre_previo") {
+      const referencia = `SC-${telefono}-${Date.now()}`;
+      pagosEsperados[referencia] = {
+        telefono,
+        tipoConsulta: "nombre",
+        tipoPersona: sesion.tipoPersona || "nat",
+        termino: mensaje,
+      };
+      const enlace = await crearEnlacePago(telefono, referencia);
+      sesiones[telefono] = { paso: "esperando_pago" };
+      respuesta = `💳 Para realizar la consulta de *${mensaje}*, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago, recibirá los resultados automáticamente.`;
 
-    } else if (sesion.paso === "esperando_radicado") {
-      sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
-      const resultado = await consultarPorRadicado(mensaje);
-      respuesta = resultado.mensaje;
+    } else if (sesion.paso === "esperando_radicado_previo") {
+      const referencia = `SC-${telefono}-${Date.now()}`;
+      pagosEsperados[referencia] = {
+        telefono,
+        tipoConsulta: "radicado",
+        termino: mensaje,
+      };
+      const enlace = await crearEnlacePago(telefono, referencia);
+      sesiones[telefono] = { paso: "esperando_pago" };
+      respuesta = `💳 Para consultar el radicado *${mensaje}*, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago, recibirá los resultados automáticamente.`;
+
+    } else if (sesion.paso === "esperando_pago") {
+      respuesta = "⏳ Su pago aún no ha sido confirmado. Por favor complete el pago en el enlace enviado o escriba *CANCELAR* para iniciar de nuevo.";
+      if (mensaje.toUpperCase() === "CANCELAR") {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = "Consulta cancelada. Escriba cualquier mensaje para iniciar de nuevo.";
+      }
 
     } else {
       sesiones[telefono] = { paso: "inicio" };
@@ -95,6 +131,40 @@ app.post("/webhook", async (req, res) => {
 
   } catch (e) {
     console.error("Error en webhook:", e.message);
+  }
+});
+
+// Webhook de Wompi — recibe notificación de pago completado
+app.post("/wompi/eventos", async (req, res) => {
+  res.json({ status: "ok" });
+
+  try {
+    const evento = req.body;
+    if (evento?.event !== "transaction.updated") return;
+
+    const transaccion = evento.data?.transaction;
+    if (transaccion?.status !== "APPROVED") return;
+
+    const referencia = transaccion.reference;
+    const consulta = pagosEsperados[referencia];
+    if (!consulta) return;
+
+    delete pagosEsperados[referencia];
+    sesiones[consulta.telefono] = { paso: "inicio" };
+
+    await enviarMensaje(consulta.telefono, "✅ *Pago confirmado.* Consultando en la Rama Judicial... ⏳");
+
+    let resultado;
+    if (consulta.tipoConsulta === "nombre") {
+      resultado = await consultarPorNombre(consulta.termino, consulta.tipoPersona);
+    } else {
+      resultado = await consultarPorRadicado(consulta.termino);
+    }
+
+    await enviarMensaje(consulta.telefono, resultado.mensaje);
+
+  } catch (e) {
+    console.error("Error en webhook Wompi:", e.message);
   }
 });
 
