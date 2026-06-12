@@ -24,7 +24,7 @@ async function consultarPorNombre(nombre, tipoPersona = "auto") {
       codificacionDespacho: "",
       pagina: 1,
     };
-    const response = await axios.get(url, { params, headers: HEADERS, timeout: 15000 });
+    const response = await axios.get(url, { params, headers: HEADERS, timeout: 30000 });
     console.log("tipoPersona usado:", tipoPersona);
     console.log("DATA:", JSON.stringify(response.data).substring(0, 300));
     return procesarRespuesta(response.data, nombre);
