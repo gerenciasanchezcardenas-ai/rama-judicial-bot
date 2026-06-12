@@ -21,6 +21,21 @@ const BASE_URL =
 
 const HEADERS = {
   "Content-Type": "application/json",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+  "Accept-Encoding": "gzip, deflate, br",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Referer": "https://consultaprocesos.ramajudicial.gov.co/Procesos/Index",
+  "Origin": "https://consultaprocesos.ramajudicial.gov.co",
+  "Connection": "keep-alive",
+  "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
+};
+  "Content-Type": "application/json",
   Accept: "application/json",
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
