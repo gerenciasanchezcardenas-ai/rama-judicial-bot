@@ -23,9 +23,9 @@ async function consultarPorNombre(nombre, tipoPersona = "nat") {
       codificacionDespacho: "",
       pagina: 1,
     };
-    const response = await axios.get(url, { params, headers: HEADERS, timeout: 15000 });
+    const response = await axios.get(...)
+    console.log("RESPUESTA API:", JSON.stringify(response.data).substring(0, 500));
     return procesarRespuesta(response.data, nombre);
-  } catch (error) {
     console.error("Error consultarPorNombre:", error.message);
     return manejarError(error);
   }
