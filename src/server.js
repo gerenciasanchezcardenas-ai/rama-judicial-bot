@@ -34,7 +34,9 @@ async function crearEnlacePago(referencia) {
     .update(referencia + PRECIO_CONSULTA + "COP" + WOMPI_INTEGRITY_KEY)
     .digest("hex");
   return "https://checkout.wompi.co/p/?public-key=" + process.env.WOMPI_PUBLIC_KEY + "&currency=COP&amount-in-cents=" + PRECIO_CONSULTA + "&reference=" + referencia + "&signature:integrity=" + integrity;
-}app.post("/webhook", async (req, res) => {
+}
+
+app.post("/webhook", async (req, res) => {
   res.json({ status: "ok" });
   try {
     const entry = req.body && req.body.entry && req.body.entry[0];
@@ -42,12 +44,9 @@ async function crearEnlacePago(referencia) {
     const value = changes && changes.value;
     const mensaje_obj = value && value.messages && value.messages[0];
     if (!mensaje_obj || mensaje_obj.type !== "text") return;
-
     const telefono = mensaje_obj.from;
-    const mensaje = mensaje_obj.text.body.trim();
-    const sesion = sesiones[telefono] || { paso: "inicio" };
+    const mensaje = mensaje_obj.text.body.trim();const sesion = sesiones[telefono] || { paso: "inicio" };
     let respuesta = "";
-
     if (sesion.paso === "inicio") {
       respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting.\n\nDesea consultar procesos judiciales activos?\n\nResponda SI para continuar.";
       sesiones[telefono] = { paso: "esperando_confirmacion" };
@@ -74,15 +73,35 @@ async function crearEnlacePago(referencia) {
         respuesta = "Por favor ingrese el nombre completo de la persona natural:";
         sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "nat" };
       } else if (mensaje === "2") {
-        respuesta = "Por favor ingrese la razon social de la empresa:";
-        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "jur" };
-      } else {
-        respuesta = "Por favor responda 1 para Natural o 2 para Juridica.";
-      }
-    } else if (sesion.paso === "esperando_nombre_previo") {
-      const tipoPersona = sesion.tipoPersona || "nat";
+        respuesta = "Por favor ingrese la} else if (sesion.paso === "esperando_radicado_previo") {
       sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");app.post("/wompi/eventos", async (req, res) => {
+      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");
+      const resultado = await consultarPorRadicado(mensaje);
+      if (!resultado.tieneProcesos) {
+        respuesta = resultado.mensaje;
+      } else {
+        const referencia = "SC-" + telefono + "-" + Date.now();
+        pagosEsperados[referencia] = { telefono: telefono, detalle: resultado.detalle };
+        const enlace = await crearEnlacePago(referencia);
+        sesiones[telefono] = { paso: "esperando_pago" };
+        respuesta = "Se encontraron " + resultado.cantidad + " proceso(s) para el radicado " + mensaje + ".\n\nPara ver el detalle realice el pago de $20.000 COP:\n\n" + enlace;
+      }
+    } else if (sesion.paso === "esperando_pago") {
+      if (mensaje.toUpperCase() === "CANCELAR") {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = "Consulta cancelada. Escriba cualquier mensaje para iniciar de nuevo.";
+      } else {
+        respuesta = "Su pago aun no ha sido confirmado. Complete el pago en el enlace enviado o escriba CANCELAR para iniciar de nuevo.";
+      }
+    } else {
+      sesiones[telefono] = { paso: "inicio" };
+      respuesta = "Escriba cualquier mensaje para iniciar la consulta.";
+    }
+    if (respuesta) await enviarMensaje(telefono, respuesta);
+  } catch (e) {
+    console.error("Error en webhook:", e.message);
+  }
+});app.post("/wompi/eventos", async (req, res) => {
   res.json({ status: "ok" });
   try {
     const evento = req.body;
@@ -101,7 +120,8 @@ async function crearEnlacePago(referencia) {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ estado: "OK", servicio:"Sanchez & Cardenas Bot Rama Judicial", hora: new Date().toISOString() }); });
+  res.json({ estado: "OK", servicio: "Sanchez & Cardenas Bot Rama Judicial", hora: new Date().toISOString() });
+});
 
 app.listen(PORT, function() {
   console.log("Servidor activo en http://localhost:" + PORT);
