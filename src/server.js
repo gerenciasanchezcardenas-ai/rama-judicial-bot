@@ -48,6 +48,7 @@ app.post("/webhook", async (req, res) => {
     const mensaje = mensaje_obj.text.body.trim();
     const sesion = sesiones[telefono] || { paso: "inicio" };
     let respuesta = "";
+
     if (sesion.paso === "inicio") {
       respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.";
       sesiones[telefono] = { paso: "esperando_confirmacion" };
@@ -93,4 +94,54 @@ app.post("/webhook", async (req, res) => {
         sesiones[telefono] = { paso: "esperando_pago" };
         respuesta = "Se encontraron " + resultado.cantidad + " proceso(s) para " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
       }
-    } else if (sesion.paso ===
+    } else if (sesion.paso === "esperando_radicado_previo") {
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");
+      const resultado = await consultarPorRadicado(mensaje);
+      if (!resultado.tieneProcesos) {
+        respuesta = resultado.mensaje;
+      } else {
+        const referencia = "SC-" + telefono + "-" + Date.now();
+        pagosEsperados[referencia] = { telefono: telefono, detalle: resultado.detalle };
+        const enlace = await crearEnlacePago(referencia);
+        sesiones[telefono] = { paso: "esperando_pago" };
+        respuesta = "Se encontro el proceso para el radicado " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
+      }
+    } else if (sesion.paso === "esperando_pago") {
+      respuesta = "Su pago esta siendo procesado. Una vez confirmado recibira el detalle de los procesos. Si ya pago y no ha recibido respuesta, contactenos: +57 313 829 1633";
+    } else {
+      sesiones[telefono] = { paso: "inicio" };
+      respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.";
+    }
+
+    if (respuesta) {
+      await enviarMensaje(telefono, respuesta);
+    }
+  } catch (err) {
+    console.error("Error en webhook:", err.message);
+  }
+});
+
+app.post("/wompi-webhook", async (req, res) => {
+  res.json({ status: "ok" });
+  try {
+    const evento = req.body;
+    if (evento && evento.event === "transaction.updated") {
+      const txn = evento.data && evento.data.transaction;
+      if (txn && txn.status === "APPROVED") {
+        const referencia = txn.reference;
+        const pago = pagosEsperados[referencia];
+        if (pago) {
+          await enviarMensaje(pago.telefono, "Pago confirmado! Aqui esta el detalle de los procesos:\n\n" + pago.detalle);
+          delete pagosEsperados[referencia];
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error en wompi-webhook:", err.message);
+  }
+});
+
+app.get("/", (req, res) => res.send("Bot Rama Judicial activo."));
+
+app.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
