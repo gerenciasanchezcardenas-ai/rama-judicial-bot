@@ -26,14 +26,10 @@ async function enviarMensaje(telefono, texto) {
 }
 
 app.post("/webhook", async (req, res) => {
-  res.json({ status: "ok" }); // responder 200 inmediatamente
+  res.json({ status: "ok" });
 
   try {
-    const entry = req.body?.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const mensaje_obj = value?.messages?.[0];
-
+    const mensaje_obj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!mensaje_obj || mensaje_obj.type !== "text") return;
 
     const telefono = mensaje_obj.from;
@@ -43,27 +39,51 @@ app.post("/webhook", async (req, res) => {
     let respuesta = "";
 
     if (sesion.paso === "inicio") {
-      respuesta = "¡Hola! 👋 Soy el asistente de *Sánchez & Cárdenas Consulting*.\n\n¿Desea consultar si tiene procesos judiciales activos? Responda *SÍ* para continuar.";
+      respuesta = "¡Hola! 👋 Soy el asistente de *Sánchez & Cárdenas Consulting*.\n\n¿Desea consultar procesos judiciales activos?\n\nResponda *SÍ* para continuar.";
       sesiones[telefono] = { paso: "esperando_confirmacion" };
 
     } else if (sesion.paso === "esperando_confirmacion") {
       if (mensaje.toLowerCase().includes("sí") || mensaje.toLowerCase().includes("si")) {
-        respuesta = "Por favor ingrese su *nombre completo* o el *número de radicado* del proceso.";
-        sesiones[telefono] = { paso: "esperando_nombre" };
+        respuesta = "¿Desea consultar por:\n\n1️⃣ *Nombre o Razón Social*\n2️⃣ *Número de Radicado*\n\nResponda *1* o *2*.";
+        sesiones[telefono] = { paso: "esperando_tipo_consulta" };
       } else {
         respuesta = "Entendido. Si necesita consultar en otro momento, escríbame.";
         sesiones[telefono] = { paso: "inicio" };
       }
 
+    } else if (sesion.paso === "esperando_tipo_consulta") {
+      if (mensaje === "1") {
+        respuesta = "¿El sujeto procesal es:\n\n1️⃣ *Persona Natural*\n2️⃣ *Persona Jurídica*\n\nResponda *1* o *2*.";
+        sesiones[telefono] = { paso: "esperando_tipo_persona" };
+      } else if (mensaje === "2") {
+        respuesta = "Por favor ingrese el *número de radicado* del proceso:";
+        sesiones[telefono] = { paso: "esperando_radicado" };
+      } else {
+        respuesta = "Por favor responda *1* para Nombre o *2* para Radicado.";
+      }
+
+    } else if (sesion.paso === "esperando_tipo_persona") {
+      if (mensaje === "1") {
+        respuesta = "Por favor ingrese el *nombre completo* de la persona natural:";
+        sesiones[telefono] = { paso: "esperando_nombre", tipoPersona: "nat" };
+      } else if (mensaje === "2") {
+        respuesta = "Por favor ingrese la *razón social* de la empresa:";
+        sesiones[telefono] = { paso: "esperando_nombre", tipoPersona: "jur" };
+      } else {
+        respuesta = "Por favor responda *1* para Natural o *2* para Jurídica.";
+      }
+
     } else if (sesion.paso === "esperando_nombre") {
+      const tipoPersona = sesion.tipoPersona || "nat";
       sesiones[telefono] = { paso: "inicio" };
       await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
+      const resultado = await consultarPorNombre(mensaje, tipoPersona);
+      respuesta = resultado.mensaje;
 
-      const esNum = /^\d{6,15}$/.test(mensaje.replace(/\s/g, ""));
-      const resultado = esNum
-        ? await consultarPorRadicado(mensaje)
-        : await consultarPorNombre(mensaje);
-
+    } else if (sesion.paso === "esperando_radicado") {
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
+      const resultado = await consultarPorRadicado(mensaje);
       respuesta = resultado.mensaje;
 
     } else {
