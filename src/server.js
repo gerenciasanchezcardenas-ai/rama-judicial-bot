@@ -6,10 +6,12 @@ const { consultarPorNombre, consultarPorRadicado } = require("./ramaJudicial");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.D360_API_KEY;
-const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
 const WOMPI_INTEGRITY_KEY = process.env.WOMPI_INTEGRITY_KEY;
 const PRECIO_CONSULTA = 2000000;
 
@@ -18,14 +20,17 @@ const pagosEsperados = {};
 
 async function enviarMensaje(telefono, texto) {
   try {
-    await axios.post(API_URL, {
-      messaging_product: "whatsapp",
-      to: telefono,
-      type: "text",
-      text: { body: texto },
-    }, { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } });
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const params = new URLSearchParams();
+    params.append("From", TWILIO_WHATSAPP_NUMBER);
+    params.append("To", "whatsapp:+" + telefono);
+    params.append("Body", texto);
+    await axios.post(url, params, {
+      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" }
+    });
   } catch (e) {
-    console.error("Error enviando mensaje:", e.message);
+    console.error("Error enviando mensaje:", e.message, e.response && JSON.stringify(e.response.data));
   }
 }
 
@@ -37,15 +42,16 @@ async function crearEnlacePago(referencia) {
 }
 
 app.post("/webhook", async (req, res) => {
-  res.json({ status: "ok" });
+  res.sendStatus(200);
   try {
-    const entry = req.body && req.body.entry && req.body.entry[0];
-    const changes = entry && entry.changes && entry.changes[0];
-    const value = changes && changes.value;
-    const mensaje_obj = value && value.messages && value.messages[0];
-    if (!mensaje_obj || mensaje_obj.type !== "text") return;
-    const telefono = mensaje_obj.from;
-    const mensaje = mensaje_obj.text.body.trim();
+    const body = req.body;
+    console.log("Webhook recibido:", JSON.stringify(body));
+
+    const telefono = (body.From || "").replace("whatsapp:+", "");
+    const mensaje = (body.Body || "").trim();
+
+    if (!telefono || !mensaje) return;
+
     const sesion = sesiones[telefono] || { paso: "inicio" };
     let respuesta = "";
 
@@ -89,7 +95,7 @@ app.post("/webhook", async (req, res) => {
         respuesta = resultado.mensaje;
       } else {
         const referencia = "SC-" + telefono + "-" + Date.now();
-        pagosEsperados[referencia] = { telefono: telefono, detalle: resultado.detalle };
+        pagosEsperados[referencia] = { telefono, detalle: resultado.detalle };
         const enlace = await crearEnlacePago(referencia);
         sesiones[telefono] = { paso: "esperando_pago" };
         respuesta = "Se encontraron " + resultado.cantidad + " proceso(s) para " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
@@ -102,7 +108,7 @@ app.post("/webhook", async (req, res) => {
         respuesta = resultado.mensaje;
       } else {
         const referencia = "SC-" + telefono + "-" + Date.now();
-        pagosEsperados[referencia] = { telefono: telefono, detalle: resultado.detalle };
+        pagosEsperados[referencia] = { telefono, detalle: resultado.detalle };
         const enlace = await crearEnlacePago(referencia);
         sesiones[telefono] = { paso: "esperando_pago" };
         respuesta = "Se encontro el proceso para el radicado " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
