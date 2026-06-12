@@ -17,7 +17,7 @@ const axios = require("axios");
 
 // ── Configuración base ────────────────────────────────────────
 const BASE_URL =
-  "https://consultaprocesos.ramajudicial.gov.co/api/v2";
+  "https://consultaprocesos.ramajudicial.gov.co:448/api/v2";
 
 const HEADERS = {
   "Content-Type": "application/json",
@@ -44,24 +44,26 @@ const HEADERS = {
 };
 
 // ── Función principal: buscar por nombre ─────────────────────
-async function consultarPorNombre(nombre) {
+async function consultarPorNombre(nombre, tipoPersona = "nat") {
   try {
     const url = `${BASE_URL}/Procesos/Consulta/NombreRazonSocial`;
 
     const params = {
-      nombre: nombre.trim().toUpperCase(),
-      SoloActivos: false,
-      pagina: 1,
-    };
+  nombre: nombre.trim().toUpperCase(),
+  tipoPersona: tipoPersona,
+  SoloActivos: false,
+  codificacionDespacho: "",
+  pagina: 1,
+};
 
     const response = await axios.get(url, {
       params,
       headers: HEADERS,
-      timeout: 15000,
-    });
+        timeout: 15000,
+      });
 
-    return procesarRespuesta(response.data, "nombre", nombre);
-  } catch (error) {
+      return procesarRespuesta(response.data, "nombre", nombre);
+    } catch (error) {
     return manejarError(error);
   }
 }
