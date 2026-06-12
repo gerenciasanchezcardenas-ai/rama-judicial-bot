@@ -18,31 +18,87 @@ const pagosEsperados = {};
 
 async function enviarMensaje(telefono, texto) {
   try {
-    await axios.post(
-      API_URL,
-      {
-        messaging_product: "whatsapp",
-        to: telefono,
-        type: "text",
-        text: { body: texto },
-      },
-      { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
-    );
+    await axios.post(API_URL, {
+      messaging_product: "whatsapp",
+      to: telefono,
+      type: "text",
+      text: { body: texto },
+    }, { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } });
   } catch (e) {
     console.error("Error enviando mensaje:", e.message);
   }
 }
 
 async function crearEnlacePago(referencia) {
-  const integrity = crypto
-    .createHash("sha256")
-    .update(`${referencia}${PRECIO_CONSULTA}COP${WOMPI_INTEGRITY_KEY}`)
+  const integrity = crypto.createHash("sha256")
+    .update(referencia + PRECIO_CONSULTA + "COP" + WOMPI_INTEGRITY_KEY)
     .digest("hex");
-  return `https://checkout.wompi.co/p/?public-key=${process.env.WOMPI_PUBLIC_KEY}&currency=COP&amount-in-cents=${PRECIO_CONSULTA}&reference=${referencia}&signature:integrity=${integrity}`;
-}
-
-app.post("/webhook", async (req, res) => {
+  return "https://checkout.wompi.co/p/?public-key=" + process.env.WOMPI_PUBLIC_KEY + "&currency=COP&amount-in-cents=" + PRECIO_CONSULTA + "&reference=" + referencia + "&signature:integrity=" + integrity;
+}app.post("/webhook", async (req, res) => {
   res.json({ status: "ok" });
-
   try {
-    const mensaje_obj = req.body?.entry?.[0]?.changes?.[0]?.valu
+    const entry = req.body && req.body.entry && req.body.entry[0];
+    const changes = entry && entry.changes && entry.changes[0];
+    const value = changes && changes.value;
+    const mensaje_obj = value && value.messages && value.messages[0];
+    if (!mensaje_obj || mensaje_obj.type !== "text") return;
+
+    const telefono = mensaje_obj.from;
+    const mensaje = mensaje_obj.text.body.trim();
+    const sesion = sesiones[telefono] || { paso: "inicio" };
+    let respuesta = "";
+
+    if (sesion.paso === "inicio") {
+      respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting.\n\nDesea consultar procesos judiciales activos?\n\nResponda SI para continuar.";
+      sesiones[telefono] = { paso: "esperando_confirmacion" };
+    } else if (sesion.paso === "esperando_confirmacion") {
+      if (mensaje.toLowerCase().includes("si")) {
+        respuesta = "Desea consultar por:\n\n1. Nombre o Razon Social\n2. Numero de Radicado\n\nResponda 1 o 2.";
+        sesiones[telefono] = { paso: "esperando_tipo_consulta" };
+      } else {
+        respuesta = "Entendido. Si necesita consultar en otro momento, escribame.";
+        sesiones[telefono] = { paso: "inicio" };
+      }
+    } else if (sesion.paso === "esperando_tipo_consulta") {
+      if (mensaje === "1") {
+        respuesta = "El sujeto procesal es:\n\n1. Persona Natural\n2. Persona Juridica\n\nResponda 1 o 2.";
+        sesiones[telefono] = { paso: "esperando_tipo_persona" };
+      } else if (mensaje === "2") {
+        respuesta = "Por favor ingrese el numero de radicado del proceso:";
+        sesiones[telefono] = { paso: "esperando_radicado_previo" };
+      } else {
+        respuesta = "Por favor responda 1 para Nombre o 2 para Radicado.";
+      }
+    } else if (sesion.paso === "esperando_tipo_persona") {
+      if (mensaje === "1") {
+        respuesta = "Por favor ingrese el nombre completo de la persona natural:";
+        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "nat" };
+      } else if (mensaje === "2") {
+        respuesta = "Por favor ingrese la razon social de la empresa:";
+        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "jur" };
+      } else {
+        respuesta = "Por favor responda 1 para Natural o 2 para Juridica.";
+      }
+    } else if (sesion.paso === "esperando_nombre_previo") {
+      const tipoPersona = sesion.tipoPersona || "nat";
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");app.post("/wompi/eventos", async (req, res) => {
+  res.json({ status: "ok" });
+  try {
+    const evento = req.body;
+    if (!evento || evento.event !== "transaction.updated") return;
+    const transaccion = evento.data && evento.data.transaction;
+    if (!transaccion || transaccion.status !== "APPROVED") return;
+    const referencia = transaccion.reference;
+    const consulta = pagosEsperados[referencia];
+    if (!consulta) return;
+    delete pagosEsperados[referencia];
+    sesiones[consulta.telefono] = { paso: "inicio" };
+    await enviarMensaje(consulta.telefono, "Pago confirmado. Aqui estan los resultados:\n\n" + consulta.detalle);
+  } catch (e) {
+    console.error("Error en webhook Wompi:", e.message);
+  }
+});
+
+app.get("/health", (req, res) => {
+  res.json({ estado: "OK", servicio:
