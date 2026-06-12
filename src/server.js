@@ -101,4 +101,8 @@ async function crearEnlacePago(referencia) {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ estado: "OK", servicio:
+  res.json({ estado: "OK", servicio:"Sanchez & Cardenas Bot Rama Judicial", hora: new Date().toISOString() }); });
+
+app.listen(PORT, function() {
+  console.log("Servidor activo en http://localhost:" + PORT);
+});
