@@ -73,7 +73,7 @@ app.post("/webhook", async (req, res) => {
         respuesta = "Por favor ingrese el nombre completo de la persona natural:";
         sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "nat" };
       } else if (mensaje === "2") {
-        respuesta = "Por favor ingrese la} else if (sesion.paso === "esperando_radicado_previo") {
+        respuesta = "Por favor ingrese la razon social de la empresa:";
       sesiones[telefono] = { paso: "inicio" };
       await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");
       const resultado = await consultarPorRadicado(mensaje);
