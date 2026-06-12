@@ -42,7 +42,7 @@ async function crearEnlacePago(referencia) {
 }
 
 app.post("/webhook", async (req, res) => {
-  res.status(200).send();
+  res.set('Content-Type', 'text/xml').status(200).send('<Response></Response>');
   try {
     const body = req.body;
     console.log("Webhook recibido:", JSON.stringify(body));
