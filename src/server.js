@@ -10,13 +10,11 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.D360_API_KEY;
 const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
-const WOMPI_PRIVATE_KEY = process.env.WOMPI_PRIVATE_KEY;
 const WOMPI_INTEGRITY_KEY = process.env.WOMPI_INTEGRITY_KEY;
-const WOMPI_EVENTS_SECRET = process.env.WOMPI_EVENTS_SECRET;
-const PRECIO_CONSULTA = 2000000; // $20.000 COP en centavos
+const PRECIO_CONSULTA = 2000000;
 
 const sesiones = {};
-const pagosEsperados = {}; // { referencia: { telefono, tipoConsulta, tipoPersona, termino } }
+const pagosEsperados = {};
 
 async function enviarMensaje(telefono, texto) {
   try {
@@ -35,12 +33,11 @@ async function enviarMensaje(telefono, texto) {
   }
 }
 
-async function crearEnlacePago(telefono, referencia) {
+async function crearEnlacePago(referencia) {
   const integrity = crypto
     .createHash("sha256")
     .update(`${referencia}${PRECIO_CONSULTA}COP${WOMPI_INTEGRITY_KEY}`)
     .digest("hex");
-
   return `https://checkout.wompi.co/p/?public-key=${process.env.WOMPI_PUBLIC_KEY}&currency=COP&amount-in-cents=${PRECIO_CONSULTA}&reference=${referencia}&signature:integrity=${integrity}`;
 }
 
@@ -93,33 +90,53 @@ app.post("/webhook", async (req, res) => {
       }
 
     } else if (sesion.paso === "esperando_nombre_previo") {
-      const referencia = `SC-${telefono}-${Date.now()}`;
-      pagosEsperados[referencia] = {
-        telefono,
-        tipoConsulta: "nombre",
-        tipoPersona: sesion.tipoPersona || "nat",
-        termino: mensaje,
-      };
-      const enlace = await crearEnlacePago(telefono, referencia);
-      sesiones[telefono] = { paso: "esperando_pago" };
-      respuesta = `💳 Para realizar la consulta de *${mensaje}*, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago, recibirá los resultados automáticamente.`;
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
+      const tipoPersona = sesion.tipoPersona || "nat";
+      const resultado = await consultarPorNombre(mensaje, tipoPersona);
+
+      if (!resultado.tieneProcesos) {
+        respuesta = `📋 *No se encontraron procesos* registrados para *${mensaje}* en la Rama Judicial.`;
+      } else {
+        const referencia = `SC-${telefono}-${Date.now()}`;
+        pagosEsperados[referencia] = {
+          telefono,
+          tipoConsulta: "nombre",
+          tipoPersona,
+          termino: mensaje,
+          detalle: resultado.detalle,
+        };
+        const enlace = await crearEnlacePago(referencia);
+        sesiones[telefono] = { paso: "esperando_pago" };
+        respuesta = `✅ Se encontraron *${resultado.cantidad}* proceso(s) para *${mensaje}*.\n\n💳 Para ver el detalle completo, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago recibirá los resultados automáticamente.`;
+      }
 
     } else if (sesion.paso === "esperando_radicado_previo") {
-      const referencia = `SC-${telefono}-${Date.now()}`;
-      pagosEsperados[referencia] = {
-        telefono,
-        tipoConsulta: "radicado",
-        termino: mensaje,
-      };
-      const enlace = await crearEnlacePago(telefono, referencia);
-      sesiones[telefono] = { paso: "esperando_pago" };
-      respuesta = `💳 Para consultar el radicado *${mensaje}*, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago, recibirá los resultados automáticamente.`;
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
+      const resultado = await consultarPorRadicado(mensaje);
+
+      if (!resultado.tieneProcesos) {
+        respuesta = `📋 *No se encontraron procesos* registrados para el radicado *${mensaje}* en la Rama Judicial.`;
+      } else {
+        const referencia = `SC-${telefono}-${Date.now()}`;
+        pagosEsperados[referencia] = {
+          telefono,
+          tipoConsulta: "radicado",
+          termino: mensaje,
+          detalle: resultado.detalle,
+        };
+        const enlace = await crearEnlacePago(referencia);
+        sesiones[telefono] = { paso: "esperando_pago" };
+        respuesta = `✅ Se encontraron *${resultado.cantidad}* proceso(s) para el radicado *${mensaje}*.\n\n💳 Para ver el detalle completo, realice el pago de *$20.000 COP*:\n\n🔗 ${enlace}\n\nUna vez completado el pago recibirá los resultados automáticamente.`;
+      }
 
     } else if (sesion.paso === "esperando_pago") {
-      respuesta = "⏳ Su pago aún no ha sido confirmado. Por favor complete el pago en el enlace enviado o escriba *CANCELAR* para iniciar de nuevo.";
       if (mensaje.toUpperCase() === "CANCELAR") {
         sesiones[telefono] = { paso: "inicio" };
         respuesta = "Consulta cancelada. Escriba cualquier mensaje para iniciar de nuevo.";
+      } else {
+        respuesta = "⏳ Su pago aún no ha sido confirmado. Complete el pago en el enlace enviado o escriba *CANCELAR* para iniciar de nuevo.";
       }
 
     } else {
@@ -134,14 +151,12 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Webhook de Wompi — recibe notificación de pago completado
 app.post("/wompi/eventos", async (req, res) => {
   res.json({ status: "ok" });
 
   try {
     const evento = req.body;
     if (evento?.event !== "transaction.updated") return;
-
     const transaccion = evento.data?.transaction;
     if (transaccion?.status !== "APPROVED") return;
 
@@ -152,16 +167,7 @@ app.post("/wompi/eventos", async (req, res) => {
     delete pagosEsperados[referencia];
     sesiones[consulta.telefono] = { paso: "inicio" };
 
-    await enviarMensaje(consulta.telefono, "✅ *Pago confirmado.* Consultando en la Rama Judicial... ⏳");
-
-    let resultado;
-    if (consulta.tipoConsulta === "nombre") {
-      resultado = await consultarPorNombre(consulta.termino, consulta.tipoPersona);
-    } else {
-      resultado = await consultarPorRadicado(consulta.termino);
-    }
-
-    await enviarMensaje(consulta.telefono, resultado.mensaje);
+    await enviarMensaje(consulta.telefono, "✅ *Pago confirmado.* Aquí están los resultados:\n\n" + consulta.detalle);
 
   } catch (e) {
     console.error("Error en webhook Wompi:", e.message);
