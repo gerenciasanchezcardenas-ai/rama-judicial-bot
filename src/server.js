@@ -52,6 +52,13 @@ app.post("/webhook", async (req, res) => {
 
     if (!telefono || !mensaje) return;
 
+    // Palabra clave para reiniciar sesión
+    if (["reiniciar", "menu", "menú", "inicio"].includes(mensaje.toLowerCase())) {
+      sesiones[telefono] = { paso: "inicio" };
+      await enviarMensaje(telefono, "Sesion reiniciada. Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.");
+      return;
+    }
+
     const sesion = sesiones[telefono] || { paso: "inicio" };
     let respuesta = "";
 
