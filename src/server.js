@@ -105,7 +105,7 @@ app.post("/webhook", async (req, res) => {
         pagosEsperados[referencia] = { telefono, detalle: resultado.detalle };
         const enlace = await crearEnlacePago(referencia);
         sesiones[telefono] = { paso: "esperando_pago" };
-        respuesta = "Se encontraron " + resultado.cantidad + " proceso(s) para " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
+        respuesta = resultado.resumenPrevio + "\n\n💳 Para ver el detalle completo realice el pago de $20.000 COP: " + enlace;
       }
     } else if (sesion.paso === "esperando_radicado_previo") {
       sesiones[telefono] = { paso: "inicio" };
@@ -118,7 +118,7 @@ app.post("/webhook", async (req, res) => {
         pagosEsperados[referencia] = { telefono, detalle: resultado.detalle };
         const enlace = await crearEnlacePago(referencia);
         sesiones[telefono] = { paso: "esperando_pago" };
-        respuesta = "Se encontro el proceso para el radicado " + mensaje + ". Para ver el detalle realice el pago de $20.000 COP: " + enlace;
+        respuesta = resultado.resumenPrevio + "\n\n💳 Para ver el detalle completo realice el pago de $20.000 COP: " + enlace;
       }
     } else if (sesion.paso === "esperando_pago") {
       respuesta = "Su pago esta siendo procesado. Una vez confirmado recibira el detalle de los procesos. Si ya pago y no ha recibido respuesta, contactenos: +57 313 829 1633";
