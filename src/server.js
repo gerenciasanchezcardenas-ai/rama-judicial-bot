@@ -52,6 +52,12 @@ app.post("/webhook", async (req, res) => {
 
     if (!telefono || !mensaje) return;
 
+    // Saludo automático al activar sandbox
+    if (mensaje.toLowerCase().startsWith("join")) {
+      await enviarMensaje(telefono, "Bienvenido a Sanchez & Cardenas Consulting! 👋\n\nPuede iniciar la consulta de procesos judiciales en la Rama Judicial de Colombia escribiendo *Hola*.\n\nSi requiere asesoria juridica inmediata, escribanos al correo: gerenciasanchezcardenas@gmail.com\n\nEstamos para servirle.");
+      return;
+    }
+
     // Palabra clave para reiniciar sesión
     if (["reiniciar", "menu", "menú", "inicio"].includes(mensaje.toLowerCase())) {
       sesiones[telefono] = { paso: "inicio" };
