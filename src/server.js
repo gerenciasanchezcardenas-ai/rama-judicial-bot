@@ -169,11 +169,10 @@ function generarPDF(termino, procesos, cantidad) {
         .fillColor(NAVY).font("Helvetica-Bold")
         .text(p.despacho || "N/A", { continued: false });
       y += 13;
-
-      if (p.sujetosProcesales && p.sujetosProcesales.length > 0) {
-        const demandante = p.sujetosProcesales.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandante"));
-        const demandado = p.sujetosProcesales.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandado"));
-        if (demandante) {
+      const sujetos = Array.isArray(p.sujetosProcesales) ? p.sujetosProcesales : [];
+      if (sujetos.length > 0) {
+        const demandante = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandante"));
+        const demandado = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandado"));        if (demandante) {
           doc.fillColor(GRAY).fontSize(9).font("Helvetica")
             .text("Demandante: ", 55, y, { continued: true })
             .fillColor(NAVY).font("Helvetica-Bold")
