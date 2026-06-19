@@ -65,15 +65,19 @@ async function enviarMensaje(telefono, texto) {
 async function enviarPDF(telefono, pdfPath, termino) {
   try {
     const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-    // Subir PDF a un host temporal usando transfer.sh
     const fileBuffer = fs.readFileSync(pdfPath);
     const fileName = path.basename(pdfPath);
-    const uploadResponse = await axios.put(
-      `https://transfer.sh/${fileName}`,
-      fileBuffer,
-      { headers: { "Content-Type": "application/pdf", "Max-Days": "1" }, timeout: 30000 }
-    );
-    const pdfUrl = uploadResponse.data.trim();
+
+    const FormData = require("form-data");
+    const form = new FormData();
+    form.append("file", fileBuffer, { filename: fileName, contentType: "application/pdf" });
+    const uploadResponse = await axios.post("https://file.io/?expires=1d", form, {
+      headers: { ...form.getHeaders() },
+      timeout: 30000
+    });
+    const pdfUrl = uploadResponse.data && uploadResponse.data.link;
+    if (!pdfUrl) throw new Error("No se obtuvo URL del PDF");
+
     await client.messages.create({
       from: TWILIO_WHATSAPP_NUMBER,
       to: "whatsapp:+" + telefono,
@@ -83,11 +87,9 @@ async function enviarPDF(telefono, pdfPath, termino) {
     console.log("PDF enviado:", pdfUrl);
   } catch (e) {
     console.error("Error enviando PDF:", e.message);
-    // Si falla el PDF, enviar mensaje de texto como respaldo
     await enviarMensaje(telefono, "⚠️ No se pudo adjuntar el PDF. Por favor contáctenos: gerenciasanchezcardenas@gmail.com");
   }
 }
-
 function generarPDF(termino, procesos, cantidad) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: "A4" });
