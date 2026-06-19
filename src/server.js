@@ -37,13 +37,32 @@ const EXPLICACIONES_PROCESO = {
   "DECLARATIVO": "Se busca que el juez declare la existencia o inexistencia de un derecho o situación jurídica.",
 };
 
-function obtenerExplicacion(tipoProceso) {
-  if (!tipoProceso) return "Proceso judicial activo que requiere atención. Consulte con un abogado para conocer su situación específica.";
-  const tipo = tipoProceso.toUpperCase();
-  for (const [key, val] of Object.entries(EXPLICACIONES_PROCESO)) {
-    if (tipo.includes(key)) return val;
-  }
-  return "Proceso judicial activo registrado en la Rama Judicial de Colombia. Se recomienda consultar con un abogado para determinar su situación procesal.";
+function obtenerExplicacion(tipoProceso, despacho) {
+  const fuente = ((tipoProceso || "") + " " + (despacho || "")).toUpperCase();
+
+  if (fuente.includes("EJECUTIV")) return "⚠️ PROCESO EJECUTIVO — Se está buscando el cobro forzado de una deuda u obligación económica en su contra. Este tipo de proceso permite al demandante solicitar el embargo de sus cuentas bancarias, salarios, bienes inmuebles y vehículos. Si no actúa a tiempo, sus bienes pueden ser rematados judicialmente. Recomendamos buscar asesoría jurídica de manera urgente. Nuestro equipo puede estudiar el proceso y plantear las excepciones de mérito que correspondan.";
+
+  if (fuente.includes("CIVIL")) return "⚠️ PROCESO CIVIL — Existe una demanda de carácter civil que busca declarar, modificar o extinguir derechos patrimoniales o personales en su contra. Dependiendo de la etapa procesal, puede existir riesgo de medidas cautelares sobre sus bienes. Ignorar este proceso puede resultar en una sentencia adversa que afecte gravemente su patrimonio. Le recomendamos asesorarse con un abogado a la brevedad posible.";
+
+  if (fuente.includes("LABORAL")) return "⚠️ PROCESO LABORAL — Un trabajador o extrabajador está reclamando derechos laborales en su contra, tales como salarios, prestaciones sociales, indemnizaciones o reintegros. En Colombia, los procesos laborales suelen fallar a favor del trabajador cuando el empleador no cuenta con defensa técnica adecuada. Una condena puede incluir indexación, intereses y costas procesales. Actuar a tiempo marca la diferencia.";
+
+  if (fuente.includes("PENAL")) return "⚠️ PROCESO PENAL — Existe una actuación penal en su contra o en la que usted figura como sujeto procesal. Esto puede incluir investigaciones, imputaciones o acusaciones formales. Las consecuencias pueden ir desde multas hasta privación de la libertad. Es indispensable contar con representación jurídica especializada de manera inmediata para proteger sus derechos fundamentales.";
+
+  if (fuente.includes("FAMILIA")) return "⚠️ PROCESO DE FAMILIA — Este proceso puede involucrar obligaciones alimentarias, custodia de menores, visitas, divorcio o liquidación de sociedad conyugal. El incumplimiento de obligaciones familiares puede derivar en sanciones, embargos de salario e incluso medidas restrictivas. Nuestros abogados le orientarán sobre sus derechos y las mejores estrategias de defensa o acuerdo.";
+
+  if (fuente.includes("ADMINISTRATIV")) return "⚠️ PROCESO CONTENCIOSO ADMINISTRATIVO — Se trata de una demanda ante la jurisdicción contencioso administrativa que puede involucrar reclamaciones contra el Estado o acciones de nulidad, reparación directa o contractuales. Este tipo de procesos tiene términos estrictos y requiere de representación especializada para evitar consecuencias patrimoniales o administrativas graves.";
+
+  if (fuente.includes("CONSTITUCIONAL") || fuente.includes("TUTELA")) return "⚠️ ACCIÓN DE TUTELA — Se ha interpuesto una acción de tutela que busca la protección inmediata de derechos fundamentales. Los fallos de tutela son de obligatorio cumplimiento inmediato. El incumplimiento puede generar desacato y sanciones disciplinarias. Es fundamental conocer el alcance de la orden judicial y actuar dentro de los términos establecidos.";
+
+  if (fuente.includes("HIPOTECAR") || fuente.includes("REMATE")) return "⚠️ PROCESO HIPOTECARIO — Se está buscando hacer efectiva una garantía hipotecaria sobre un bien inmueble de su propiedad. Si este proceso avanza sin defensa técnica, su propiedad podría ser rematada judicialmente. Existen mecanismos legales para suspender el proceso o llegar a acuerdos con el acreedor. Consulte con nosotros antes de que sea demasiado tarde.";
+
+  if (fuente.includes("SUCESION") || fuente.includes("HERENCIA")) return "⚠️ PROCESO DE SUCESIÓN — Existe un proceso de liquidación de herencia en curso. La falta de participación activa puede resultar en la exclusión de su porción hereditaria o en acuerdos desfavorables para sus intereses. Nuestros abogados le guiarán en la defensa y reconocimiento de sus derechos sucesorales.";
+
+  if (fuente.includes("VERBAL")) return "⚠️ PROCESO VERBAL — Este proceso busca resolver una controversia de manera ágil ante un juez. Aunque su trámite es más rápido que otros procesos, las consecuencias patrimoniales pueden ser igualmente significativas. La ausencia de defensa técnica puede resultar en condenas económicas o pérdida de derechos. Actúe con tiempo.";
+
+  if (fuente.includes("MUNICIPAL") || fuente.includes("CIRCUITO")) return "⚠️ PROCESO JUDICIAL ACTIVO — Figura usted en un proceso judicial que se tramita ante un juzgado de la Rama Judicial de Colombia. Sin conocer el detalle de las pretensiones, existe riesgo de que se dicten medidas que afecten su patrimonio o sus derechos si no cuenta con representación legal adecuada. Le recomendamos consultar con nuestro equipo para evaluar su situación específica.";
+
+  return "⚠️ PROCESO JUDICIAL ACTIVO — Existe un proceso registrado en la Rama Judicial en el que usted figura como sujeto procesal. Dependiendo de las pretensiones de la demanda, su patrimonio, derechos o libertad podrían verse afectados. No espere a recibir notificaciones tardías. Nuestro equipo de abogados puede revisar su caso y orientarle sobre los pasos a seguir.";
 }
 
 async function enviarMensaje(telefono, texto) {
@@ -190,7 +209,7 @@ function generarPDF(termino, procesos, cantidad) {
       y += 13;
 
       // Explicación
-      const explicacion = obtenerExplicacion(p.tipoProceso);
+      const explicacion = obtenerExplicacion(p.tipoProceso, p.despacho);
       doc.rect(55, y, doc.page.width - 110, 2).fill("#e8e8e8");
       y += 6;
       doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold").text("⚠️ ¿Qué significa este proceso?", 55, y);
