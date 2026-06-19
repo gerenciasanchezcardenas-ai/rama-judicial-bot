@@ -62,6 +62,7 @@ function procesarRespuesta(data, termino) {
     return {
       tieneProcesos: true,
       cantidad: 1000,
+      procesos: [],
       resumenPrevio: "Se encontraron mas de 1.000 procesos para " + termino + ". Por favor ingrese el nombre completo.",
       detalle: "Se encontraron mas de 1.000 procesos para " + termino + ". Por favor ingrese el nombre completo.",
       mensaje: "",
@@ -73,24 +74,22 @@ function procesarRespuesta(data, termino) {
     return {
       tieneProcesos: false,
       cantidad: 0,
+      procesos: [],
       resumenPrevio: "",
       detalle: "",
       mensaje: "No se encontraron procesos registrados para " + termino + " en la Rama Judicial.",
     };
   }
 
-  // Contar activos vs archivados
   const activos = procesos.filter(p => p.esPrivado === false || p.fechaUltimaActuacion).length;
   const archivados = procesos.length - activos;
 
-  // Resumen previo al pago — genera urgencia
   let resumenPrevio = "⚠️ Se encontraron *" + cantidad + " proceso(s)* para *" + termino + "*.\n\n";
   resumenPrevio += "📋 De los primeros " + procesos.length + " registros:\n";
   resumenPrevio += "🔴 Activos: " + activos + "\n";
   resumenPrevio += "📁 Archivados: " + archivados + "\n\n";
   resumenPrevio += "Para ver el detalle completo (radicados, despachos, tipos y fechas) realice el pago.";
 
-  // Detalle completo — se entrega después del pago
   let detalle = "✅ Reporte de procesos para *" + termino + "* (" + cantidad + " proceso(s) total):\n\n";
   const lista = procesos.slice(0, 5);
   for (let i = 0; i < lista.length; i++) {
@@ -104,7 +103,7 @@ function procesarRespuesta(data, termino) {
     detalle += "...y " + (cantidad - 5) + " proceso(s) mas. Consulte en: https://consultaprocesos.ramajudicial.gov.co";
   }
 
-  return { tieneProcesos: true, cantidad, resumenPrevio, detalle, mensaje: "" };
+  return { tieneProcesos: true, cantidad, procesos, resumenPrevio, detalle, mensaje: "" };
 }
 
 function manejarError(error) {
@@ -112,6 +111,7 @@ function manejarError(error) {
   return {
     tieneProcesos: false,
     cantidad: 0,
+    procesos: [],
     resumenPrevio: "",
     detalle: "",
     mensaje: "El sistema de Rama Judicial presenta dificultades tecnicas. Por favor intente nuevamente o contactenos: +57 313 829 1633",
