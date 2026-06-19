@@ -65,19 +65,9 @@ async function enviarMensaje(telefono, texto) {
 async function enviarPDF(telefono, pdfPath, termino) {
   try {
     const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-    const fileBuffer = fs.readFileSync(pdfPath);
     const fileName = path.basename(pdfPath);
-
-    const FormData = require("form-data");
-    const form = new FormData();
-    form.append("file", fileBuffer, { filename: fileName, contentType: "application/pdf" });
-    const uploadResponse = await axios.post("https://file.io/?expires=1d", form, {
-      headers: { ...form.getHeaders() },
-      timeout: 30000
-    });
-    const pdfUrl = uploadResponse.data && uploadResponse.data.link;
-    if (!pdfUrl) throw new Error("No se obtuvo URL del PDF");
-
+    // Servir el PDF desde el propio servidor
+    const pdfUrl = `https://rama-judicial-bot.onrender.com/reporte/${fileName}`;
     await client.messages.create({
       from: TWILIO_WHATSAPP_NUMBER,
       to: "whatsapp:+" + telefono,
@@ -90,6 +80,7 @@ async function enviarPDF(telefono, pdfPath, termino) {
     await enviarMensaje(telefono, "⚠️ No se pudo adjuntar el PDF. Por favor contáctenos: gerenciasanchezcardenas@gmail.com");
   }
 }
+
 function generarPDF(termino, procesos, cantidad) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: "A4" });
@@ -171,10 +162,12 @@ function generarPDF(termino, procesos, cantidad) {
         .fillColor(NAVY).font("Helvetica-Bold")
         .text(p.despacho || "N/A", { continued: false });
       y += 13;
+
       const sujetos = Array.isArray(p.sujetosProcesales) ? p.sujetosProcesales : [];
       if (sujetos.length > 0) {
         const demandante = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandante"));
-        const demandado = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandado"));        if (demandante) {
+        const demandado = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandado"));
+        if (demandante) {
           doc.fillColor(GRAY).fontSize(9).font("Helvetica")
             .text("Demandante: ", 55, y, { continued: true })
             .fillColor(NAVY).font("Helvetica-Bold")
@@ -365,6 +358,17 @@ app.post("/wompi-webhook", async (req, res) => {
     }
   } catch (err) {
     console.error("Error en wompi-webhook:", err.message);
+  }
+});
+
+app.get("/reporte/:filename", (req, res) => {
+  const filePath = `/tmp/${req.params.filename}`;
+  if (fs.existsSync(filePath)) {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${req.params.filename}"`);
+    res.sendFile(filePath);
+  } else {
+    res.status(404).send("Reporte no encontrado");
   }
 });
 
