@@ -6,7 +6,7 @@ const PDFDocument = require("pdfkit");
 const fs = require("fs");
 const path = require("path");
 const twilio = require("twilio");
-const { consultarPorNombre, consultarPorRadicado } = require("./ramaJudicial");
+const { consultarPorNombre, consultarPorRadicado, obtenerUltimaActuacion } = require("./ramaJudicial");
 
 const app = express();
 app.use(express.json());
@@ -85,7 +85,6 @@ async function enviarPDF(telefono, pdfPath, termino) {
   try {
     const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
     const fileName = path.basename(pdfPath);
-    // Servir el PDF desde el propio servidor
     const pdfUrl = `https://rama-judicial-bot.onrender.com/reporte/${fileName}`;
     await client.messages.create({
       from: TWILIO_WHATSAPP_NUMBER,
@@ -100,153 +99,222 @@ async function enviarPDF(telefono, pdfPath, termino) {
   }
 }
 
-function generarPDF(termino, procesos, cantidad) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: "A4" });
-    const fileName = `reporte_${Date.now()}.pdf`;
-    const filePath = `/tmp/${fileName}`;
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
-
-    // Colores
-    const NAVY = "#0d1b2a";
-    const GOLD = "#b8973a";
-    const CREAM = "#f9f6ef";
-    const GRAY = "#666666";
-
-    // Header
-    doc.rect(0, 0, doc.page.width, 120).fill(NAVY);
-    doc.fillColor(GOLD).fontSize(22).font("Helvetica-Bold")
-      .text("SÁNCHEZ & CÁRDENAS CONSULTING S.A.S.", 50, 30);
-    doc.fillColor(CREAM).fontSize(11).font("Helvetica")
-      .text("Derecho Corporativo & Consultoría Legal", 50, 58);
-    doc.fillColor(GOLD).fontSize(10)
-      .text("sanchezcardenasconsulting.com  |  gerenciasanchezcardenas@gmail.com", 50, 76);
-
-    // Línea dorada
-    doc.rect(0, 120, doc.page.width, 4).fill(GOLD);
-
-    // Título del reporte
-    doc.fillColor(NAVY).fontSize(16).font("Helvetica-Bold")
-      .text("REPORTE DE PROCESOS JUDICIALES", 50, 145, { align: "center" });
-    doc.fillColor(GRAY).fontSize(11).font("Helvetica")
-      .text("Consultado: " + termino.toUpperCase(), 50, 168, { align: "center" });
-    doc.fillColor(GRAY).fontSize(10)
-      .text("Fecha: " + new Date().toLocaleDateString("es-CO", { year: "numeric", month: "long", day: "numeric" }), 50, 185, { align: "center" });
-    doc.fillColor(GRAY).fontSize(10)
-      .text("Total de procesos registrados: " + cantidad, 50, 200, { align: "center" });
-
-    // Línea separadora
-    doc.moveTo(50, 220).lineTo(doc.page.width - 50, 220).strokeColor(GOLD).lineWidth(1).stroke();
-
-    // Procesos activos
-    const activos = procesos.filter(p => p.fechaUltimaActuacion || p.esPrivado === false);
-    let y = 235;
-
-    doc.fillColor(NAVY).fontSize(13).font("Helvetica-Bold")
-      .text("PROCESOS ACTIVOS (" + activos.length + ")", 50, y);
-    y += 20;
-
-    if (activos.length === 0) {
-      doc.fillColor(GRAY).fontSize(11).font("Helvetica")
-        .text("No se encontraron procesos activos en esta consulta.", 50, y);
-      y += 20;
+// ── FUNCIÓN AUXILIAR: extrae demandantes y demandados de sujetosProcesales ───
+// Cubre variantes: "Demandante", "Demandante/accionante", "Demandado/indiciado/causante", etc.
+function extraerSujetos(sujetosProcesales) {
+  const lista = Array.isArray(sujetosProcesales) ? sujetosProcesales : [];
+  const demandantes = [];
+  const demandados = [];
+  for (const s of lista) {
+    const tipo = (s.tipoSujeto || "").trim().toUpperCase();
+    const nombre = (s.nombre || s.razonSocial || "").trim();
+    if (!nombre) continue;
+    if (tipo.startsWith("DEMANDANTE")) {
+      demandantes.push(nombre);
+    } else if (tipo.startsWith("DEMANDADO")) {
+      demandados.push(nombre);
     }
+  }
+  return { demandantes, demandados };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
-    for (let i = 0; i < activos.length; i++) {
-      const p = activos[i];
+async function generarPDF(termino, procesos, cantidad) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: "A4" });
+      const fileName = `reporte_${Date.now()}.pdf`;
+      const filePath = `/tmp/${fileName}`;
+      const stream = fs.createWriteStream(filePath);
+      doc.pipe(stream);
 
-      // Verificar si necesita nueva página
-      if (y > doc.page.height - 200) {
+      // Colores
+      const NAVY = "#0d1b2a";
+      const GOLD = "#b8973a";
+      const CREAM = "#f9f6ef";
+      const GRAY = "#666666";
+
+      // Header
+      doc.rect(0, 0, doc.page.width, 120).fill(NAVY);
+      doc.fillColor(GOLD).fontSize(22).font("Helvetica-Bold")
+        .text("SÁNCHEZ & CÁRDENAS CONSULTING S.A.S.", 50, 30);
+      doc.fillColor(CREAM).fontSize(11).font("Helvetica")
+        .text("Derecho Corporativo & Consultoría Legal", 50, 58);
+      doc.fillColor(GOLD).fontSize(10)
+        .text("sanchezcardenasconsulting.com  |  gerenciasanchezcardenas@gmail.com", 50, 76);
+
+      // Línea dorada
+      doc.rect(0, 120, doc.page.width, 4).fill(GOLD);
+
+      // Título del reporte
+      doc.fillColor(NAVY).fontSize(16).font("Helvetica-Bold")
+        .text("REPORTE DE PROCESOS JUDICIALES", 50, 145, { align: "center" });
+      doc.fillColor(GRAY).fontSize(11).font("Helvetica")
+        .text("Consultado: " + termino.toUpperCase(), 50, 168, { align: "center" });
+      doc.fillColor(GRAY).fontSize(10)
+        .text("Fecha: " + new Date().toLocaleDateString("es-CO", { year: "numeric", month: "long", day: "numeric" }), 50, 185, { align: "center" });
+      doc.fillColor(GRAY).fontSize(10)
+        .text("Total de procesos registrados: " + cantidad, 50, 200, { align: "center" });
+
+      // Línea separadora
+      doc.moveTo(50, 220).lineTo(doc.page.width - 50, 220).strokeColor(GOLD).lineWidth(1).stroke();
+
+      // Procesos activos
+      const activos = procesos.filter(p => p.fechaUltimaActuacion || p.esPrivado === false);
+      let y = 235;
+
+      doc.fillColor(NAVY).fontSize(13).font("Helvetica-Bold")
+        .text("PROCESOS ACTIVOS (" + activos.length + ")", 50, y);
+      y += 20;
+
+      if (activos.length === 0) {
+        doc.fillColor(GRAY).fontSize(11).font("Helvetica")
+          .text("No se encontraron procesos activos en esta consulta.", 50, y);
+        y += 20;
+      }
+
+      // ── CONSULTAR ÚLTIMA ACTUACIÓN EN PARALELO para todos los procesos activos ──
+      const ultimasActuaciones = await Promise.all(
+        activos.map(p => p.idProceso ? obtenerUltimaActuacion(p.idProceso) : Promise.resolve(null))
+      );
+      // ─────────────────────────────────────────────────────────────────────────────
+
+      for (let i = 0; i < activos.length; i++) {
+        const p = activos[i];
+        const ultimaAct = ultimasActuaciones[i]; // puede ser null si la API falló
+
+        // Verificar si necesita nueva página
+        if (y > doc.page.height - 220) {
+          doc.addPage();
+          y = 50;
+        }
+
+        // Caja del proceso
+        doc.rect(50, y, doc.page.width - 100, 8).fill(NAVY);
+        y += 12;
+
+        doc.fillColor(NAVY).fontSize(11).font("Helvetica-Bold")
+          .text((i + 1) + ". " + (p.tipoProceso || "Proceso Judicial"), 55, y);
+        y += 16;
+
+        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+          .text("Radicado: ", 55, y, { continued: true })
+          .fillColor(NAVY).font("Helvetica-Bold")
+          .text(p.llaveProceso || "N/A", { continued: false });
+        y += 13;
+
+        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+          .text("Despacho: ", 55, y, { continued: true })
+          .fillColor(NAVY).font("Helvetica-Bold")
+          .text(p.despacho || "N/A", { continued: false });
+        y += 13;
+
+        // ── DEMANDANTES Y DEMANDADOS (corregido) ────────────────────────────
+        const { demandantes, demandados } = extraerSujetos(p.sujetosProcesales);
+
+        if (demandantes.length > 0) {
+          // Verificar espacio
+          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
+          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+            .text("Demandante: ", 55, y, { continued: true })
+            .fillColor(NAVY).font("Helvetica-Bold")
+            .text(demandantes.join(" / "), { continued: false, width: doc.page.width - 120 });
+          y += doc.heightOfString(demandantes.join(" / "), { width: doc.page.width - 175 }) + 4;
+        }
+
+        if (demandados.length > 0) {
+          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
+          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+            .text("Demandado: ", 55, y, { continued: true })
+            .fillColor(NAVY).font("Helvetica-Bold")
+            .text(demandados.join(" / "), { continued: false, width: doc.page.width - 120 });
+          y += doc.heightOfString(demandados.join(" / "), { width: doc.page.width - 175 }) + 4;
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+          .text("Última actuación: ", 55, y, { continued: true })
+          .fillColor(NAVY).font("Helvetica-Bold")
+          .text((p.fechaUltimaActuacion || p.fechaProceso || "N/A").substring(0, 10), { continued: false });
+        y += 13;
+
+        // ── DETALLE DE LA ÚLTIMA ACTUACIÓN ───────────────────────────────────
+        if (ultimaAct) {
+          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
+          doc.rect(55, y, doc.page.width - 110, 1).fill("#d0c8b0");
+          y += 6;
+
+          doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold")
+            .text("📋 DETALLE ÚLTIMA ACTUACIÓN", 55, y);
+          y += 13;
+
+          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+            .text("Tipo: ", 55, y, { continued: true })
+            .fillColor(NAVY).font("Helvetica-Bold")
+            .text(ultimaAct.actuacion || "N/A", { continued: false });
+          y += 13;
+
+          if (ultimaAct.anotacion) {
+            if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
+            doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+              .text("Anotación: ", 55, y, { continued: true })
+              .fillColor(NAVY).font("Helvetica")
+              .text(ultimaAct.anotacion, { continued: false, width: doc.page.width - 120 });
+            y += doc.heightOfString(ultimaAct.anotacion, { width: doc.page.width - 175 }) + 4;
+          }
+
+          if (ultimaAct.fechaFinTermino && ultimaAct.fechaFinTermino !== "0001-01-01") {
+            if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
+            doc.fillColor("#c0392b").fontSize(9).font("Helvetica-Bold")
+              .text("⏰ Vence término: " + ultimaAct.fechaFinTermino, 55, y);
+            y += 13;
+          }
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        // Explicación jurídica
+        if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
+        doc.rect(55, y, doc.page.width - 110, 2).fill("#e8e8e8");
+        y += 6;
+        doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold").text("⚠️ ¿Qué significa este proceso?", 55, y);
+        y += 13;
+        const explicacion = obtenerExplicacion(p.tipoProceso, p.despacho);
+        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
+          .text(explicacion, 55, y, { width: doc.page.width - 110 });
+        y += doc.heightOfString(explicacion, { width: doc.page.width - 110 }) + 8;
+        y += 10;
+      }
+
+      // Footer con CTA
+      if (y > doc.page.height - 150) {
         doc.addPage();
         y = 50;
       }
 
-      // Caja del proceso
-      doc.rect(50, y, doc.page.width - 100, 8).fill(NAVY);
-      y += 12;
+      doc.moveTo(50, y).lineTo(doc.page.width - 50, y).strokeColor(GOLD).lineWidth(1).stroke();
+      y += 15;
 
-      doc.fillColor(NAVY).fontSize(11).font("Helvetica-Bold")
-        .text((i + 1) + ". " + (p.tipoProceso || "Proceso Judicial"), 55, y);
-      y += 16;
-
+      doc.rect(50, y, doc.page.width - 100, 80).fill("#f0ece0");
+      doc.fillColor(NAVY).fontSize(12).font("Helvetica-Bold")
+        .text("¿Necesita asesoría jurídica?", 60, y + 10);
+      doc.fillColor(GRAY).fontSize(10).font("Helvetica")
+        .text("Nuestros abogados pueden representarle y proteger sus derechos en cualquiera de estos procesos.", 60, y + 26, { width: doc.page.width - 120 });
+      doc.fillColor(GOLD).fontSize(10).font("Helvetica-Bold")
+        .text("👉 Agende su asesoría virtual: sanchezcardenasconsulting.com/#asesoria", 60, y + 52);
       doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text("Radicado: ", 55, y, { continued: true })
-        .fillColor(NAVY).font("Helvetica-Bold")
-        .text(p.llaveProceso || "N/A", { continued: false });
-      y += 13;
+        .text("gerenciasanchezcardenas@gmail.com  |  +57 313 829 1633", 60, y + 66);
 
-      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text("Despacho: ", 55, y, { continued: true })
-        .fillColor(NAVY).font("Helvetica-Bold")
-        .text(p.despacho || "N/A", { continued: false });
-      y += 13;
+      // Footer final
+      doc.rect(0, doc.page.height - 40, doc.page.width, 40).fill(NAVY);
+      doc.fillColor(GOLD).fontSize(8).font("Helvetica")
+        .text("Sánchez & Cárdenas Consulting S.A.S.  |  Bogotá, Colombia  |  www.sanchezcardenasconsulting.com", 50, doc.page.height - 26, { align: "center" });
 
-      const sujetos = Array.isArray(p.sujetosProcesales) ? p.sujetosProcesales : [];
-      if (sujetos.length > 0) {
-        const demandante = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandante"));
-        const demandado = sujetos.find(s => s.tipoSujeto && s.tipoSujeto.toLowerCase().includes("demandado"));
-        if (demandante) {
-          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-            .text("Demandante: ", 55, y, { continued: true })
-            .fillColor(NAVY).font("Helvetica-Bold")
-            .text(demandante.nombre || "N/A", { continued: false });
-          y += 13;
-        }
-        if (demandado) {
-          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-            .text("Demandado: ", 55, y, { continued: true })
-            .fillColor(NAVY).font("Helvetica-Bold")
-            .text(demandado.nombre || "N/A", { continued: false });
-          y += 13;
-        }
-      }
-
-      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text("Última actuación: ", 55, y, { continued: true })
-        .fillColor(NAVY).font("Helvetica-Bold")
-        .text((p.fechaUltimaActuacion || p.fechaProceso || "N/A").substring(0, 10), { continued: false });
-      y += 13;
-
-      // Explicación
-      const explicacion = obtenerExplicacion(p.tipoProceso, p.despacho);
-      doc.rect(55, y, doc.page.width - 110, 2).fill("#e8e8e8");
-      y += 6;
-      doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold").text("⚠️ ¿Qué significa este proceso?", 55, y);
-      y += 13;
-      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text(explicacion, 55, y, { width: doc.page.width - 110 });
-      y += doc.heightOfString(explicacion, { width: doc.page.width - 110 }) + 8;
-      y += 10;
+      doc.end();
+      stream.on("finish", () => resolve(filePath));
+      stream.on("error", reject);
+    } catch (err) {
+      reject(err);
     }
-
-    // Footer con CTA
-    if (y > doc.page.height - 150) {
-      doc.addPage();
-      y = 50;
-    }
-
-    doc.moveTo(50, y).lineTo(doc.page.width - 50, y).strokeColor(GOLD).lineWidth(1).stroke();
-    y += 15;
-
-    doc.rect(50, y, doc.page.width - 100, 80).fill("#f0ece0");
-    doc.fillColor(NAVY).fontSize(12).font("Helvetica-Bold")
-      .text("¿Necesita asesoría jurídica?", 60, y + 10);
-    doc.fillColor(GRAY).fontSize(10).font("Helvetica")
-      .text("Nuestros abogados pueden representarle y proteger sus derechos en cualquiera de estos procesos.", 60, y + 26, { width: doc.page.width - 120 });
-    doc.fillColor(GOLD).fontSize(10).font("Helvetica-Bold")
-      .text("👉 Agende su asesoría virtual: sanchezcardenasconsulting.com/#asesoria", 60, y + 52);
-    doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-      .text("gerenciasanchezcardenas@gmail.com  |  +57 313 829 1633", 60, y + 66);
-
-    // Footer final
-    doc.rect(0, doc.page.height - 40, doc.page.width, 40).fill(NAVY);
-    doc.fillColor(GOLD).fontSize(8).font("Helvetica")
-      .text("Sánchez & Cárdenas Consulting S.A.S.  |  Bogotá, Colombia  |  www.sanchezcardenasconsulting.com", 50, doc.page.height - 26, { align: "center" });
-
-    doc.end();
-    stream.on("finish", () => resolve(filePath));
-    stream.on("error", reject);
   });
 }
 
@@ -365,7 +433,6 @@ app.post("/wompi-webhook", async (req, res) => {
           try {
             const pdfPath = await generarPDF(pago.termino, pago.procesos, pago.cantidad);
             await enviarPDF(pago.telefono, pdfPath, pago.termino);
-            // Limpiar archivo temporal
             setTimeout(() => { try { fs.unlinkSync(pdfPath); } catch(e) {} }, 60000);
           } catch (pdfError) {
             console.error("Error generando PDF:", pdfError.message);
