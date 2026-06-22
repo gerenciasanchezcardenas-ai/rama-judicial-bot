@@ -57,6 +57,35 @@ async function consultarPorRadicado(radicado) {
   }
 }
 
+// ── NUEVA FUNCIÓN ────────────────────────────────────────────────────────────
+// Trae únicamente la última actuación de un proceso dado su idProceso numérico.
+// Retorna un objeto con { actuacion, anotacion, fechaActuacion, fechaFinTermino }
+// o null si no hay actuaciones o la API falla.
+async function obtenerUltimaActuacion(idProceso) {
+  try {
+    const url = `${BASE_URL}/Proceso/${idProceso}/Actuaciones`;
+    const params = { pagina: 1 };
+    const response = await axios.get(url, { params, headers: HEADERS, timeout: 20000 });
+    const data = response.data;
+    // La API devuelve { actuaciones: [...] } ordenadas de más reciente a más antigua
+    if (data && data.actuaciones && data.actuaciones.length > 0) {
+      const ult = data.actuaciones[0];
+      return {
+        actuacion: ult.actuacion || "",
+        anotacion: ult.anotacion || "",
+        fechaActuacion: (ult.fechaActuacion || "").substring(0, 10),
+        fechaFinTermino: (ult.fechaFinTermino || "").substring(0, 10),
+        fechaRegistro: (ult.fechaRegistro || "").substring(0, 10),
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error("Error obtenerUltimaActuacion idProceso=" + idProceso + ":", error.message);
+    return null;
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function procesarRespuesta(data, termino) {
   if (data && data.StatusCode === 400) {
     return {
@@ -118,4 +147,4 @@ function manejarError(error) {
   };
 }
 
-module.exports = { consultarPorNombre, consultarPorRadicado };
+module.exports = { consultarPorNombre, consultarPorRadicado, obtenerUltimaActuacion };
