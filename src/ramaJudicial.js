@@ -63,7 +63,7 @@ async function consultarPorRadicado(radicado) {
 // o null si no hay actuaciones o la API falla.
 async function obtenerUltimaActuacion(idProceso) {
   try {
-    const url = `${BASE_URL}/Proceso/${idProceso}/Actuaciones`;
+    const url = `${BASE_URL}/Proceso/Actuaciones/${idProceso}`;
     const params = { pagina: 1 };
     const response = await axios.get(url, { params, headers: HEADERS, timeout: 20000 });
     const data = response.data;
