@@ -1,0 +1,60 @@
+// Acceso a Supabase por su API REST, con la llave service_role (solo en el servidor).
+const axios = require("axios");
+
+const URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "") + "/rest/v1";
+const KEY = process.env.SUPABASE_SERVICE_KEY || "";
+
+const api = axios.create({
+  baseURL: URL,
+  timeout: 15000,
+  headers: { apikey: KEY, Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+});
+
+// ── Sesiones ────────────────────────────────────────────────
+async function leerSesion(telefono) {
+  const { data } = await api.get("/pjp_sesiones", { params: { telefono: "eq." + telefono, select: "*" } });
+  return data[0] || { telefono, paso: "inicio", datos: {} };
+}
+
+async function guardarSesion(telefono, paso, datos = {}) {
+  await api.post("/pjp_sesiones", { telefono, paso, datos, updated_at: new Date().toISOString() }, {
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+  });
+}
+
+// ── Solicitudes ─────────────────────────────────────────────
+async function crearSolicitud(fila) {
+  const { data } = await api.post("/pjp_solicitudes", fila, { headers: { Prefer: "return=representation" } });
+  return data[0];
+}
+
+async function solicitudPorReferencia(referencia) {
+  const { data } = await api.get("/pjp_solicitudes", { params: { referencia: "eq." + referencia, select: "*" } });
+  return data[0] || null;
+}
+
+async function solicitudPorToken(token) {
+  const { data } = await api.get("/pjp_solicitudes", { params: { token_reporte: "eq." + token, select: "*" } });
+  return data[0] || null;
+}
+
+// Actualiza solo si el estado actual coincide (evita entregar dos veces el mismo reporte).
+async function actualizarSolicitud(referencia, cambios, estadoEsperado) {
+  const params = { referencia: "eq." + referencia };
+  if (estadoEsperado) params.estado = "eq." + estadoEsperado;
+  const { data } = await api.patch("/pjp_solicitudes", cambios, { params, headers: { Prefer: "return=representation" } });
+  return data[0] || null;
+}
+
+async function solicitudesPendientesDePago(desdeHoras = 24) {
+  const desde = new Date(Date.now() - desdeHoras * 3600 * 1000).toISOString();
+  const { data } = await api.get("/pjp_solicitudes", {
+    params: { estado: "eq.pendiente_pago", created_at: "gte." + desde, select: "referencia" },
+  });
+  return data;
+}
+
+module.exports = {
+  leerSesion, guardarSesion, crearSolicitud, solicitudPorReferencia,
+  solicitudPorToken, actualizarSolicitud, solicitudesPendientesDePago,
+};

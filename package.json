@@ -1,8 +1,8 @@
 {
   "name": "rama-judicial-bot",
   "version": "1.0.0",
-  "description": "Bot consulta Rama Judicial - Sánchez & Cárdenas",
-  "main": "server.js",
+  "description": "Perfil Jurídico y Patrimonial - Sánchez & Cárdenas Consulting",
+  "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
   },

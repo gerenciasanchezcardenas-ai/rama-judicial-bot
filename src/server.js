@@ -1,421 +1,266 @@
+// ============================================================
+// PERFIL JURÍDICO Y PATRIMONIAL — Sánchez & Cárdenas Consulting S.A.S.
+// Bot de WhatsApp (Twilio) + pagos Wompi + reporte PDF.
+// Fuentes automáticas: Rama Judicial y SECOP II. Supernotariado: consulta de la firma.
+// ============================================================
 require("dotenv").config();
 const express = require("express");
-const axios = require("axios");
 const crypto = require("crypto");
-const PDFDocument = require("pdfkit");
-const fs = require("fs");
-const path = require("path");
+const axios = require("axios");
 const twilio = require("twilio");
-const { consultarPorNombre, consultarPorRadicado, obtenerUltimaActuacion } = require("./ramaJudicial");
+
+const db = require("./db");
+const rama = require("./rama");
+const secop = require("./secop");
+const wompi = require("./wompi");
+const { generarPDF } = require("./reporte");
+
+const PORT = process.env.PORT || 3000;
+const BASE_URL = (process.env.PUBLIC_BASE_URL || "https://rama-judicial-bot.onrender.com").replace(/\/$/, "");
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
+const VALOR_CENTAVOS = Number(process.env.PRECIO_CENTAVOS || 5000000); // $50.000 COP
+const HORAS_SNR = Number(process.env.HORAS_ENTREGA_SNR || 12);
+const POLITICA_URL = process.env.POLITICA_DATOS_URL || "";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-const PORT = process.env.PORT || 3000;
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
-const WOMPI_INTEGRITY_KEY = process.env.WOMPI_INTEGRITY_KEY;
-const PRECIO_CONSULTA = 2000000;
+const tw = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) : null;
 
-const sesiones = {};
-const pagosEsperados = {};
+// ── Utilidades ───────────────────────────────────────────────
+const normal = (s) => (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+const fmtCOP = (centavos) => "$" + Math.round(centavos / 100).toLocaleString("es-CO");
+const fmtFechaHora = (iso) =>
+  new Date(iso).toLocaleString("es-CO", { day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: "America/Bogota" });
 
-// Explicaciones por tipo de proceso
-const EXPLICACIONES_PROCESO = {
-  "EJECUTIVO": "En este proceso se busca el cobro de una obligación económica. Es susceptible de embargo a su patrimonio (cuentas bancarias, bienes inmuebles, vehículos). Se recomienda atención inmediata.",
-  "ORDINARIO": "Este proceso busca la declaración o reconocimiento de derechos. Puede afectar sus bienes, contratos o relaciones jurídicas según lo que se pretenda en la demanda.",
-  "LABORAL": "Una persona o extrabajador reclama derechos laborales (salarios, prestaciones, indemnizaciones). En caso de condena, puede implicar pagos económicos significativos.",
-  "TUTELA": "Se solicita la protección de derechos fundamentales. Requiere respuesta urgente pues los fallos son de cumplimiento inmediato.",
-  "PENAL": "Existe una investigación o acusación de carácter criminal. Puede implicar medidas de aseguramiento o restricciones a su libertad.",
-  "FAMILIA": "Proceso relacionado con alimentos, custodia, divorcio o filiación. Puede generar obligaciones económicas o afectar relaciones familiares.",
-  "ADMINISTRATIVO": "Demanda contra una entidad pública o del Estado. Puede involucrar reclamaciones patrimoniales o anulación de actos administrativos.",
-  "VERBAL": "Proceso de conocimiento verbal para resolver controversias de menor cuantía o asuntos específicos. Requiere defensa técnica.",
-  "SUCESION": "Proceso de liquidación de herencia o patrimonio de una persona fallecida. Afecta la distribución de bienes entre herederos.",
-  "HIPOTECARIO": "Proceso para hacer efectiva una garantía hipotecaria. Su bien inmueble puede estar en riesgo de remate judicial.",
-  "DECLARATIVO": "Se busca que el juez declare la existencia o inexistencia de un derecho o situación jurídica.",
+async function enviar(telefono, texto, mediaUrl) {
+  if (!tw) return console.log("[sin Twilio] →", telefono, texto, mediaUrl || "");
+  try {
+    const msg = { from: TWILIO_WHATSAPP_NUMBER, to: "whatsapp:+" + telefono, body: texto };
+    if (mediaUrl) msg.mediaUrl = [mediaUrl];
+    await tw.messages.create(msg);
+  } catch (e) {
+    console.error("Error enviando WhatsApp:", e.message);
+    throw e;
+  }
+}
+
+// Aviso por correo a la firma cuando entra un pago (opcional: requiere RESEND_API_KEY).
+async function avisarFirma(sol) {
+  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FIRMA) return;
+  try {
+    await axios.post("https://api.resend.com/emails", {
+      from: process.env.EMAIL_REMITENTE || "Perfil Jurídico <onboarding@resend.dev>",
+      to: [process.env.EMAIL_FIRMA],
+      subject: `Supernotariado pendiente · ${sol.nombre} · vence ${fmtFechaHora(sol.snr_vence_at)}`,
+      html: `<p>Entró un pago del Perfil Jurídico y Patrimonial. Falta la consulta en la Supernotariado.</p>
+        <p><b>Persona consultada:</b> ${sol.nombre}<br><b>Documento:</b> ${sol.tipo_documento} ${sol.documento}<br>
+        <b>Referencia:</b> ${sol.referencia}<br><b>Entregar a más tardar:</b> ${fmtFechaHora(sol.snr_vence_at)}</p>`,
+    }, { headers: { Authorization: "Bearer " + process.env.RESEND_API_KEY }, timeout: 15000 });
+  } catch (e) {
+    console.error("Error avisando a la firma:", e.message);
+  }
+}
+
+// ── Textos del recorrido ─────────────────────────────────────
+const TXT = {
+  bienvenida:
+    "Hola. Le habla el asistente de *Sánchez & Cárdenas Consulting*.\n\n" +
+    "Con el *Perfil Jurídico y Patrimonial* usted conoce, a partir del nombre y el documento de una persona o empresa:\n\n" +
+    "⚖️ Los procesos judiciales en los que figura (Rama Judicial).\n" +
+    "🏛️ Sus contratos con entidades públicas y los saldos que el Estado le debe (SECOP II).\n" +
+    "🏠 Los inmuebles registrados a su nombre (Supernotariado).\n\n" +
+    `Valor: *${fmtCOP(VALOR_CENTAVOS)}*. Antes de pagar recibe un resultado preliminar gratuito.\n\n` +
+    "Para continuar, confirme que usará la información con un fin legítimo, como evaluar un negocio, una deuda o un proceso" +
+    (POLITICA_URL ? `, y que acepta nuestra política de tratamiento de datos: ${POLITICA_URL}` : "") +
+    ".\n\nResponda *ACEPTO* para continuar.",
+  tipoPersona: "¿A quién desea consultar?\n\n*1.* Una persona natural\n*2.* Una empresa (persona jurídica)\n\nResponda 1 o 2.",
+  nombreNat: "Escriba el *nombre completo* de la persona, con nombres y apellidos, tal como aparece en su cédula.",
+  nombreJur: "Escriba la *razón social completa* de la empresa. Ejemplo: COMERCIALIZADORA ANDINA S.A.S.",
+  docNat: "Ahora escriba el *número de cédula*, sin puntos ni espacios.\n\nSi es cédula de extranjería, escriba CE antes del número. Ejemplo: CE 123456",
+  docJur: "Ahora escriba el *NIT* de la empresa, sin puntos y sin dígito de verificación.",
+  consultando: "Estamos consultando la Rama Judicial y el SECOP. Puede tardar hasta un minuto.",
+  sigueConsultando: "Seguimos consultando, un momento por favor.",
+  menu: "Listo, empezamos de nuevo.",
 };
 
-function obtenerExplicacion(tipoProceso, despacho) {
-  const fuente = ((tipoProceso || "") + " " + (despacho || "")).toUpperCase();
+// ── Consulta preliminar y creación de la solicitud ───────────
+async function ejecutarConsulta(telefono, datos) {
+  await db.guardarSesion(telefono, "consultando", datos);
+  await enviar(telefono, TXT.consultando);
 
-  if (fuente.includes("EJECUTIV")) return "⚠️ PROCESO EJECUTIVO — Se está buscando el cobro forzado de una deuda u obligación económica en su contra. Este tipo de proceso permite al demandante solicitar el embargo de sus cuentas bancarias, salarios, bienes inmuebles y vehículos. Si no actúa a tiempo, sus bienes pueden ser rematados judicialmente. Recomendamos buscar asesoría jurídica de manera urgente. Nuestro equipo puede estudiar el proceso y plantear las excepciones de mérito que correspondan.";
+  const [resRama, resSecop] = await Promise.all([
+    rama.consultarPorNombre(datos.nombre, datos.tipoPersona),
+    secop.consultarContratos(datos.documento),
+  ]);
 
-  if (fuente.includes("CIVIL")) return "⚠️ PROCESO CIVIL — Existe una demanda de carácter civil que busca declarar, modificar o extinguir derechos patrimoniales o personales en su contra. Dependiendo de la etapa procesal, puede existir riesgo de medidas cautelares sobre sus bienes. Ignorar este proceso puede resultar en una sentencia adversa que afecte gravemente su patrimonio. Le recomendamos asesorarse con un abogado a la brevedad posible.";
-
-  if (fuente.includes("LABORAL")) return "⚠️ PROCESO LABORAL — Un trabajador o extrabajador está reclamando derechos laborales en su contra, tales como salarios, prestaciones sociales, indemnizaciones o reintegros. En Colombia, los procesos laborales suelen fallar a favor del trabajador cuando el empleador no cuenta con defensa técnica adecuada. Una condena puede incluir indexación, intereses y costas procesales. Actuar a tiempo marca la diferencia.";
-
-  if (fuente.includes("PENAL")) return "⚠️ PROCESO PENAL — Existe una actuación penal en su contra o en la que usted figura como sujeto procesal. Esto puede incluir investigaciones, imputaciones o acusaciones formales. Las consecuencias pueden ir desde multas hasta privación de la libertad. Es indispensable contar con representación jurídica especializada de manera inmediata para proteger sus derechos fundamentales.";
-
-  if (fuente.includes("FAMILIA")) return "⚠️ PROCESO DE FAMILIA — Este proceso puede involucrar obligaciones alimentarias, custodia de menores, visitas, divorcio o liquidación de sociedad conyugal. El incumplimiento de obligaciones familiares puede derivar en sanciones, embargos de salario e incluso medidas restrictivas. Nuestros abogados le orientarán sobre sus derechos y las mejores estrategias de defensa o acuerdo.";
-
-  if (fuente.includes("ADMINISTRATIV")) return "⚠️ PROCESO CONTENCIOSO ADMINISTRATIVO — Se trata de una demanda ante la jurisdicción contencioso administrativa que puede involucrar reclamaciones contra el Estado o acciones de nulidad, reparación directa o contractuales. Este tipo de procesos tiene términos estrictos y requiere de representación especializada para evitar consecuencias patrimoniales o administrativas graves.";
-
-  if (fuente.includes("CONSTITUCIONAL") || fuente.includes("TUTELA")) return "⚠️ ACCIÓN DE TUTELA — Se ha interpuesto una acción de tutela que busca la protección inmediata de derechos fundamentales. Los fallos de tutela son de obligatorio cumplimiento inmediato. El incumplimiento puede generar desacato y sanciones disciplinarias. Es fundamental conocer el alcance de la orden judicial y actuar dentro de los términos establecidos.";
-
-  if (fuente.includes("HIPOTECAR") || fuente.includes("REMATE")) return "⚠️ PROCESO HIPOTECARIO — Se está buscando hacer efectiva una garantía hipotecaria sobre un bien inmueble de su propiedad. Si este proceso avanza sin defensa técnica, su propiedad podría ser rematada judicialmente. Existen mecanismos legales para suspender el proceso o llegar a acuerdos con el acreedor. Consulte con nosotros antes de que sea demasiado tarde.";
-
-  if (fuente.includes("SUCESION") || fuente.includes("HERENCIA")) return "⚠️ PROCESO DE SUCESIÓN — Existe un proceso de liquidación de herencia en curso. La falta de participación activa puede resultar en la exclusión de su porción hereditaria o en acuerdos desfavorables para sus intereses. Nuestros abogados le guiarán en la defensa y reconocimiento de sus derechos sucesorales.";
-
-  if (fuente.includes("VERBAL")) return "⚠️ PROCESO VERBAL — Este proceso busca resolver una controversia de manera ágil ante un juez. Aunque su trámite es más rápido que otros procesos, las consecuencias patrimoniales pueden ser igualmente significativas. La ausencia de defensa técnica puede resultar en condenas económicas o pérdida de derechos. Actúe con tiempo.";
-
-  if (fuente.includes("MUNICIPAL") || fuente.includes("CIRCUITO")) return "⚠️ PROCESO JUDICIAL ACTIVO — Figura usted en un proceso judicial que se tramita ante un juzgado de la Rama Judicial de Colombia. Sin conocer el detalle de las pretensiones, existe riesgo de que se dicten medidas que afecten su patrimonio o sus derechos si no cuenta con representación legal adecuada. Le recomendamos consultar con nuestro equipo para evaluar su situación específica.";
-
-  return "⚠️ PROCESO JUDICIAL ACTIVO — Existe un proceso registrado en la Rama Judicial en el que usted figura como sujeto procesal. Dependiendo de las pretensiones de la demanda, su patrimonio, derechos o libertad podrían verse afectados. No espere a recibir notificaciones tardías. Nuestro equipo de abogados puede revisar su caso y orientarle sobre los pasos a seguir.";
-}
-
-async function enviarMensaje(telefono, texto) {
-  try {
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
-    const params = new URLSearchParams();
-    params.append("From", TWILIO_WHATSAPP_NUMBER);
-    params.append("To", "whatsapp:+" + telefono);
-    params.append("Body", texto);
-    await axios.post(url, params, {
-      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
-      headers: { "Content-Type": "application/x-www-form-urlencoded" }
-    });
-  } catch (e) {
-    console.error("Error enviando mensaje:", e.message, e.response && JSON.stringify(e.response.data));
+  if (resRama.demasiados) {
+    await db.guardarSesion(telefono, "esperando_nombre", datos);
+    return enviar(telefono,
+      "La Rama Judicial encontró más de mil coincidencias para ese nombre y no entrega el listado. " +
+      "Escríbalo completo, con los dos apellidos (o la razón social exacta), para afinar la búsqueda.");
   }
-}
 
-async function enviarPDF(telefono, pdfPath, termino) {
-  try {
-    const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-    const fileName = path.basename(pdfPath);
-    const pdfUrl = `https://rama-judicial-bot.onrender.com/reporte/${fileName}`;
-    await client.messages.create({
-      from: TWILIO_WHATSAPP_NUMBER,
-      to: "whatsapp:+" + telefono,
-      body: "📄 Reporte de procesos judiciales para *" + termino + "*",
-      mediaUrl: [pdfUrl]
-    });
-    console.log("PDF enviado:", pdfUrl);
-  } catch (e) {
-    console.error("Error enviando PDF:", e.message);
-    await enviarMensaje(telefono, "⚠️ No se pudo adjuntar el PDF. Por favor contáctenos: gerenciasanchezcardenas@gmail.com");
-  }
-}
-
-// ── FUNCIÓN AUXILIAR: extrae demandantes y demandados de sujetosProcesales ───
-// Cubre variantes: "Demandante", "Demandante/accionante", "Demandado/indiciado/causante", etc.
-function extraerSujetos(sujetosProcesales) {
-  const lista = Array.isArray(sujetosProcesales) ? sujetosProcesales : [];
-  const demandantes = [];
-  const demandados = [];
-  for (const s of lista) {
-    const tipo = (s.tipoSujeto || "").trim().toUpperCase();
-    const nombre = (s.nombre || s.razonSocial || "").trim();
-    if (!nombre) continue;
-    if (tipo.startsWith("DEMANDANTE")) {
-      demandantes.push(nombre);
-    } else if (tipo.startsWith("DEMANDADO")) {
-      demandados.push(nombre);
-    }
-  }
-  return { demandantes, demandados };
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function generarPDF(termino, procesos, cantidad) {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ margin: 50, size: "A4" });
-      const fileName = `reporte_${Date.now()}.pdf`;
-      const filePath = `/tmp/${fileName}`;
-      const stream = fs.createWriteStream(filePath);
-      doc.pipe(stream);
-
-      // Colores
-      const NAVY = "#0d1b2a";
-      const GOLD = "#b8973a";
-      const CREAM = "#f9f6ef";
-      const GRAY = "#666666";
-
-      // Header
-      doc.rect(0, 0, doc.page.width, 120).fill(NAVY);
-      doc.fillColor(GOLD).fontSize(22).font("Helvetica-Bold")
-        .text("SÁNCHEZ & CÁRDENAS CONSULTING S.A.S.", 50, 30);
-      doc.fillColor(CREAM).fontSize(11).font("Helvetica")
-        .text("Derecho Corporativo & Consultoría Legal", 50, 58);
-      doc.fillColor(GOLD).fontSize(10)
-        .text("sanchezcardenasconsulting.com  |  gerenciasanchezcardenas@gmail.com", 50, 76);
-
-      // Línea dorada
-      doc.rect(0, 120, doc.page.width, 4).fill(GOLD);
-
-      // Título del reporte
-      doc.fillColor(NAVY).fontSize(16).font("Helvetica-Bold")
-        .text("REPORTE DE PROCESOS JUDICIALES", 50, 145, { align: "center" });
-      doc.fillColor(GRAY).fontSize(11).font("Helvetica")
-        .text("Consultado: " + termino.toUpperCase(), 50, 168, { align: "center" });
-      doc.fillColor(GRAY).fontSize(10)
-        .text("Fecha: " + new Date().toLocaleDateString("es-CO", { year: "numeric", month: "long", day: "numeric" }), 50, 185, { align: "center" });
-      doc.fillColor(GRAY).fontSize(10)
-        .text("Total de procesos registrados: " + cantidad, 50, 200, { align: "center" });
-
-      // Línea separadora
-      doc.moveTo(50, 220).lineTo(doc.page.width - 50, 220).strokeColor(GOLD).lineWidth(1).stroke();
-
-      // Procesos activos
-      const activos = procesos.filter(p => p.fechaUltimaActuacion || p.esPrivado === false);
-      let y = 235;
-
-      doc.fillColor(NAVY).fontSize(13).font("Helvetica-Bold")
-        .text("PROCESOS ACTIVOS (" + activos.length + ")", 50, y);
-      y += 20;
-
-      if (activos.length === 0) {
-        doc.fillColor(GRAY).fontSize(11).font("Helvetica")
-          .text("No se encontraron procesos activos en esta consulta.", 50, y);
-        y += 20;
-      }
-
-      // ── CONSULTAR ÚLTIMA ACTUACIÓN EN PARALELO para todos los procesos activos ──
-      const ultimasActuaciones = await Promise.all(
-        activos.map(p => p.idProceso ? obtenerUltimaActuacion(p.idProceso) : Promise.resolve(null))
-      );
-      // ─────────────────────────────────────────────────────────────────────────────
-
-      for (let i = 0; i < activos.length; i++) {
-        const p = activos[i];
-        const ultimaAct = ultimasActuaciones[i]; // puede ser null si la API falló
-
-        // Verificar si necesita nueva página
-        if (y > doc.page.height - 220) {
-          doc.addPage();
-          y = 50;
-        }
-
-        // Caja del proceso
-        doc.rect(50, y, doc.page.width - 100, 8).fill(NAVY);
-        y += 12;
-
-        doc.fillColor(NAVY).fontSize(11).font("Helvetica-Bold")
-          .text((i + 1) + ". " + (p.tipoProceso || "Proceso Judicial"), 55, y);
-        y += 16;
-
-        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-          .text("Radicado: ", 55, y, { continued: true })
-          .fillColor(NAVY).font("Helvetica-Bold")
-          .text(p.llaveProceso || "N/A", { continued: false });
-        y += 13;
-
-        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-          .text("Despacho: ", 55, y, { continued: true })
-          .fillColor(NAVY).font("Helvetica-Bold")
-          .text(p.despacho || "N/A", { continued: false });
-        y += 13;
-
-        // ── DEMANDANTES Y DEMANDADOS (corregido) ────────────────────────────
-        const { demandantes, demandados } = extraerSujetos(p.sujetosProcesales);
-
-        if (demandantes.length > 0) {
-          // Verificar espacio
-          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
-          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-            .text("Demandante: ", 55, y, { continued: true })
-            .fillColor(NAVY).font("Helvetica-Bold")
-            .text(demandantes.join(" / "), { continued: false, width: doc.page.width - 120 });
-          y += doc.heightOfString(demandantes.join(" / "), { width: doc.page.width - 175 }) + 4;
-        }
-
-        if (demandados.length > 0) {
-          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
-          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-            .text("Demandado: ", 55, y, { continued: true })
-            .fillColor(NAVY).font("Helvetica-Bold")
-            .text(demandados.join(" / "), { continued: false, width: doc.page.width - 120 });
-          y += doc.heightOfString(demandados.join(" / "), { width: doc.page.width - 175 }) + 4;
-        }
-        // ────────────────────────────────────────────────────────────────────
-
-        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-          .text("Última actuación: ", 55, y, { continued: true })
-          .fillColor(NAVY).font("Helvetica-Bold")
-          .text((p.fechaUltimaActuacion || p.fechaProceso || "N/A").substring(0, 10), { continued: false });
-        y += 13;
-
-        // ── DETALLE DE LA ÚLTIMA ACTUACIÓN ───────────────────────────────────
-        if (ultimaAct) {
-          if (y > doc.page.height - 180) { doc.addPage(); y = 50; }
-          doc.rect(55, y, doc.page.width - 110, 1).fill("#d0c8b0");
-          y += 6;
-
-          doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold")
-            .text("📋 DETALLE ÚLTIMA ACTUACIÓN", 55, y);
-          y += 13;
-
-          doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-            .text("Tipo: ", 55, y, { continued: true })
-            .fillColor(NAVY).font("Helvetica-Bold")
-            .text(ultimaAct.actuacion || "N/A", { continued: false });
-          y += 13;
-
-          if (ultimaAct.anotacion) {
-            if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
-            doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-              .text("Anotación: ", 55, y, { continued: true })
-              .fillColor(NAVY).font("Helvetica")
-              .text(ultimaAct.anotacion, { continued: false, width: doc.page.width - 120 });
-            y += doc.heightOfString(ultimaAct.anotacion, { width: doc.page.width - 175 }) + 4;
-          }
-
-          if (ultimaAct.fechaFinTermino && ultimaAct.fechaFinTermino !== "0001-01-01") {
-            if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
-            doc.fillColor("#c0392b").fontSize(9).font("Helvetica-Bold")
-              .text("⏰ Vence término: " + ultimaAct.fechaFinTermino, 55, y);
-            y += 13;
-          }
-        }
-        // ────────────────────────────────────────────────────────────────────
-
-        // Explicación jurídica
-        if (y > doc.page.height - 160) { doc.addPage(); y = 50; }
-        doc.rect(55, y, doc.page.width - 110, 2).fill("#e8e8e8");
-        y += 6;
-        doc.fillColor(GOLD).fontSize(9).font("Helvetica-Bold").text("⚠️ ¿Qué significa este proceso?", 55, y);
-        y += 13;
-        const explicacion = obtenerExplicacion(p.tipoProceso, p.despacho);
-        doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-          .text(explicacion, 55, y, { width: doc.page.width - 110 });
-        y += doc.heightOfString(explicacion, { width: doc.page.width - 110 }) + 8;
-        y += 10;
-      }
-
-      // Footer con CTA
-      if (y > doc.page.height - 150) {
-        doc.addPage();
-        y = 50;
-      }
-
-      doc.moveTo(50, y).lineTo(doc.page.width - 50, y).strokeColor(GOLD).lineWidth(1).stroke();
-      y += 15;
-
-      doc.rect(50, y, doc.page.width - 100, 80).fill("#f0ece0");
-      doc.fillColor(NAVY).fontSize(12).font("Helvetica-Bold")
-        .text("¿Necesita asesoría jurídica?", 60, y + 10);
-      doc.fillColor(GRAY).fontSize(10).font("Helvetica")
-        .text("Nuestros abogados pueden representarle y proteger sus derechos en cualquiera de estos procesos.", 60, y + 26, { width: doc.page.width - 120 });
-      doc.fillColor(GOLD).fontSize(10).font("Helvetica-Bold")
-        .text("👉 Agende su asesoría virtual: sanchezcardenasconsulting.com/#asesoria", 60, y + 52);
-      doc.fillColor(GRAY).fontSize(9).font("Helvetica")
-        .text("gerenciasanchezcardenas@gmail.com  |  +57 313 829 1633", 60, y + 66);
-
-      // Footer final
-      doc.rect(0, doc.page.height - 40, doc.page.width, 40).fill(NAVY);
-      doc.fillColor(GOLD).fontSize(8).font("Helvetica")
-        .text("Sánchez & Cárdenas Consulting S.A.S.  |  Bogotá, Colombia  |  www.sanchezcardenasconsulting.com", 50, doc.page.height - 26, { align: "center" });
-
-      doc.end();
-      stream.on("finish", () => resolve(filePath));
-      stream.on("error", reject);
-    } catch (err) {
-      reject(err);
-    }
+  const referencia = "PJP-" + Date.now() + "-" + crypto.randomBytes(3).toString("hex");
+  const sol = await db.crearSolicitud({
+    referencia,
+    token_reporte: crypto.randomBytes(24).toString("hex"),
+    telefono,
+    tipo_persona: datos.tipoPersona,
+    nombre: datos.nombre,
+    tipo_documento: datos.tipoDocumento,
+    documento: datos.documento,
+    acepto_terminos_at: datos.aceptoAt,
+    resultado_rama: resRama,
+    resultado_secop: resSecop,
+    valor_centavos: VALOR_CENTAVOS,
   });
+
+  const r = rama.resumenRama(resRama.procesos);
+  const s = secop.resumenSecop(resSecop.contratos);
+  const enlace = wompi.enlacePago(referencia, VALOR_CENTAVOS);
+
+  let lineaRama = resRama.ok
+    ? `⚖️ Procesos judiciales: *${resRama.total}*` + (r.total ? ` (${r.recientes} con actuaciones en el último año)` : "")
+    : "⚖️ Procesos judiciales: la Rama Judicial no respondió; el informe los incluirá.";
+  let lineaSecop = resSecop.ok
+    ? `🏛️ Contratos con entidades públicas: *${s.total}*` + (s.pendiente > 0 ? " (con saldos pendientes de pago)" : "")
+    : "🏛️ Contratos públicos: el SECOP no respondió; el informe los incluirá.";
+
+  await db.guardarSesion(telefono, "esperando_pago", { referencia });
+  return enviar(telefono,
+    `*Resultado preliminar para ${sol.nombre.toUpperCase()}*\n\n${lineaRama}\n${lineaSecop}\n` +
+    `🏠 Bienes inmuebles: se consultan después del pago y se entregan dentro de ${HORAS_SNR} horas.\n\n` +
+    "El informe completo en PDF trae radicados, despachos, partes, última actuación, contratos, valores, " +
+    "cuentas donde recibe pagos y observaciones para el cobro.\n\n" +
+    `💳 Valor: *${fmtCOP(VALOR_CENTAVOS)}*. Pague aquí:\n${enlace}\n\n` +
+    "Si no desea continuar, escriba *MENÚ*.");
 }
 
-async function crearEnlacePago(referencia) {
-  const integrity = crypto.createHash("sha256")
-    .update(referencia + PRECIO_CONSULTA + "COP" + WOMPI_INTEGRITY_KEY)
-    .digest("hex");
-  return "https://checkout.wompi.co/p/?public-key=" + process.env.WOMPI_PUBLIC_KEY + "&currency=COP&amount-in-cents=" + PRECIO_CONSULTA + "&reference=" + referencia + "&signature:integrity=" + integrity;
-}
+// ── Entrega después del pago (idempotente) ───────────────────
+async function procesarPago(referencia, transaccionId) {
+  const vence = new Date(Date.now() + HORAS_SNR * 3600 * 1000).toISOString();
+  const sol = await db.actualizarSolicitud(referencia,
+    { estado: "pagado", pagado_at: new Date().toISOString(), wompi_transaccion: transaccionId || null, snr_vence_at: vence },
+    "pendiente_pago");
+  if (!sol) return; // ya procesado o inexistente
 
-app.post("/webhook", async (req, res) => {
-  res.set("Content-Type", "text/xml").status(200).send("<Response></Response>");
+  await enviar(sol.telefono, "✅ Pago confirmado. Estamos preparando su informe; tarda alrededor de un minuto.").catch(() => {});
+
+  // Detalle de la última actuación de los procesos más recientes
+  if (sol.resultado_rama && sol.resultado_rama.procesos && sol.resultado_rama.procesos.length) {
+    await rama.completarActuaciones(sol.resultado_rama.procesos);
+    await db.actualizarSolicitud(referencia, { resultado_rama: sol.resultado_rama });
+  }
+
   try {
-    const body = req.body;
-    console.log("Webhook recibido:", JSON.stringify(body));
-    const telefono = (body.From || "").replace("whatsapp:+", "");
-    const mensaje = (body.Body || "").trim();
-    if (!telefono || !mensaje) return;
+    await enviar(sol.telefono,
+      `📄 Este es su *Perfil Jurídico y Patrimonial* de ${sol.nombre.toUpperCase()}.\n\n` +
+      `La consulta de inmuebles en la Supernotariado está en curso. Recibirá el complemento a más tardar el *${fmtFechaHora(vence)}*\n\n` +
+      `Referencia: ${referencia}`,
+      `${BASE_URL}/reporte/${sol.token_reporte}.pdf`);
+    await db.actualizarSolicitud(referencia, { estado: "reporte_enviado", reporte_enviado_at: new Date().toISOString() });
+  } catch (e) {
+    await enviar(sol.telefono,
+      `Su pago quedó registrado, pero no pudimos adjuntar el PDF. Descárguelo aquí: ${BASE_URL}/reporte/${sol.token_reporte}.pdf`).catch(() => {});
+  }
+  await avisarFirma({ ...sol, snr_vence_at: vence });
+  await db.guardarSesion(sol.telefono, "inicio", {});
+}
 
-    if (mensaje.toLowerCase().startsWith("join")) {
-      await enviarMensaje(telefono, "Bienvenido a Sanchez & Cardenas Consulting! 👋\n\nPuede iniciar la consulta de procesos judiciales en la Rama Judicial de Colombia escribiendo *Hola*.\n\nSi requiere asesoria juridica inmediata, escribanos al correo: gerenciasanchezcardenas@gmail.com\n\nEstamos para servirle.");
-      return;
+// ── Conversación ─────────────────────────────────────────────
+async function atender(telefono, mensaje) {
+  const m = normal(mensaje);
+  const sesion = await db.leerSesion(telefono);
+  const datos = sesion.datos || {};
+
+  if (m.startsWith("join")) {
+    await db.guardarSesion(telefono, "esperando_aceptacion", {});
+    return enviar(telefono, TXT.bienvenida);
+  }
+  if (["menu", "nueva", "reiniciar", "inicio"].includes(m)) {
+    await db.guardarSesion(telefono, "esperando_aceptacion", {});
+    return enviar(telefono, TXT.menu + "\n\n" + TXT.bienvenida);
+  }
+
+  switch (sesion.paso) {
+    case "esperando_aceptacion":
+      if (m.startsWith("acepto")) {
+        await db.guardarSesion(telefono, "esperando_tipo", { aceptoAt: new Date().toISOString() });
+        return enviar(telefono, TXT.tipoPersona);
+      }
+      return enviar(telefono, "Para continuar necesitamos que responda *ACEPTO*. Si no desea seguir, no es necesario responder.");
+
+    case "esperando_tipo":
+      if (m === "1" || m === "2") {
+        const tipoPersona = m === "1" ? "nat" : "jur";
+        await db.guardarSesion(telefono, "esperando_nombre", { ...datos, tipoPersona });
+        return enviar(telefono, tipoPersona === "nat" ? TXT.nombreNat : TXT.nombreJur);
+      }
+      return enviar(telefono, "Responda *1* para persona natural o *2* para empresa.");
+
+    case "esperando_nombre": {
+      const nombre = mensaje.trim().replace(/\s+/g, " ");
+      if (nombre.length < 4 || (datos.tipoPersona === "nat" && nombre.split(" ").length < 2)) {
+        return enviar(telefono, "Escriba el nombre completo, con al menos un nombre y un apellido.");
+      }
+      await db.guardarSesion(telefono, "esperando_documento", { ...datos, nombre });
+      return enviar(telefono, datos.tipoPersona === "nat" ? TXT.docNat : TXT.docJur);
     }
 
-    if (["reiniciar", "menu", "menú", "inicio"].includes(mensaje.toLowerCase())) {
-      sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "Sesion reiniciada. Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.");
-      return;
+    case "esperando_documento": {
+      const esCE = datos.tipoPersona === "nat" && /^ce\b/.test(m);
+      const documento = mensaje.replace(/\D/g, "");
+      if (documento.length < 5 || documento.length > 15) {
+        return enviar(telefono, "El número no parece válido. Escríbalo solo con números, sin puntos ni dígito de verificación.");
+      }
+      const tipoDocumento = datos.tipoPersona === "jur" ? "NIT" : esCE ? "CE" : "CC";
+      return ejecutarConsulta(telefono, { ...datos, documento, tipoDocumento });
     }
 
-    const sesion = sesiones[telefono] || { paso: "inicio" };
-    let respuesta = "";
+    case "consultando":
+      return enviar(telefono, TXT.sigueConsultando);
 
-    if (sesion.paso === "inicio") {
-      respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.";
-      sesiones[telefono] = { paso: "esperando_confirmacion" };
-    } else if (sesion.paso === "esperando_confirmacion") {
-      if (mensaje.toLowerCase().includes("si")) {
-        respuesta = "Desea consultar por: 1. Nombre o Razon Social  2. Numero de Radicado. Responda 1 o 2.";
-        sesiones[telefono] = { paso: "esperando_tipo_consulta" };
-      } else {
-        respuesta = "Entendido. Si necesita consultar en otro momento, escribame.";
-        sesiones[telefono] = { paso: "inicio" };
+    case "esperando_pago": {
+      const sol = datos.referencia && (await db.solicitudPorReferencia(datos.referencia));
+      if (sol && sol.estado === "pendiente_pago") {
+        const t = await wompi.transaccionAprobada(sol.referencia);
+        if (t) return procesarPago(sol.referencia, t.id);
+        return enviar(telefono,
+          `Su enlace de pago sigue activo:\n${wompi.enlacePago(sol.referencia, sol.valor_centavos)}\n\n` +
+          "Apenas Wompi confirme el pago le enviaremos el informe. Para hacer otra consulta, escriba *NUEVA*.");
       }
-    } else if (sesion.paso === "esperando_tipo_consulta") {
-      if (mensaje === "1") {
-        respuesta = "El sujeto procesal es: 1. Persona Natural  2. Persona Juridica. Responda 1 o 2.";
-        sesiones[telefono] = { paso: "esperando_tipo_persona" };
-      } else if (mensaje === "2") {
-        respuesta = "Por favor ingrese el numero de radicado del proceso:";
-        sesiones[telefono] = { paso: "esperando_radicado_previo" };
-      } else {
-        respuesta = "Por favor responda 1 para Nombre o 2 para Radicado.";
-      }
-    } else if (sesion.paso === "esperando_tipo_persona") {
-      if (mensaje === "1") {
-        respuesta = "Por favor ingrese el nombre completo de la persona natural:";
-        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "nat" };
-      } else if (mensaje === "2") {
-        respuesta = "Por favor ingrese la razon social de la empresa:";
-        sesiones[telefono] = { paso: "esperando_nombre_previo", tipoPersona: "jur" };
-      } else {
-        respuesta = "Por favor responda 1 para Natural o 2 para Juridica.";
-      }
-    } else if (sesion.paso === "esperando_nombre_previo") {
-      const tipoPersona = sesion.tipoPersona || "nat";
-      sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");
-      const resultado = await consultarPorNombre(mensaje, tipoPersona);
-      if (!resultado.tieneProcesos) {
-        respuesta = resultado.mensaje;
-      } else {
-        const referencia = "SC-" + telefono + "-" + Date.now();
-        pagosEsperados[referencia] = { telefono, termino: mensaje, procesos: resultado.procesos || [], cantidad: resultado.cantidad, detalle: resultado.detalle };
-        const enlace = await crearEnlacePago(referencia);
-        sesiones[telefono] = { paso: "esperando_pago" };
-        respuesta = resultado.resumenPrevio + "\n\n💳 Para ver el detalle completo realice el pago de $20.000 COP: " + enlace;
-      }
-    } else if (sesion.paso === "esperando_radicado_previo") {
-      sesiones[telefono] = { paso: "inicio" };
-      await enviarMensaje(telefono, "Consultando en la Rama Judicial... un momento.");
-      const resultado = await consultarPorRadicado(mensaje);
-      if (!resultado.tieneProcesos) {
-        respuesta = resultado.mensaje;
-      } else {
-        const referencia = "SC-" + telefono + "-" + Date.now();
-        pagosEsperados[referencia] = { telefono, termino: mensaje, procesos: resultado.procesos || [], cantidad: resultado.cantidad, detalle: resultado.detalle };
-        const enlace = await crearEnlacePago(referencia);
-        sesiones[telefono] = { paso: "esperando_pago" };
-        respuesta = resultado.resumenPrevio + "\n\n💳 Para ver el detalle completo realice el pago de $20.000 COP: " + enlace;
-      }
-    } else if (sesion.paso === "esperando_pago") {
-      respuesta = "Su pago esta siendo procesado. Una vez confirmado recibira el detalle de los procesos. Si ya pago y no ha recibido respuesta, contactenos: +57 313 829 1633";
-    } else {
-      sesiones[telefono] = { paso: "inicio" };
-      respuesta = "Hola! Soy el asistente de Sanchez & Cardenas Consulting. Desea consultar procesos judiciales activos? Responda SI para continuar.";
+      await db.guardarSesion(telefono, "esperando_aceptacion", {});
+      return enviar(telefono, TXT.bienvenida);
     }
 
-    if (respuesta) await enviarMensaje(telefono, respuesta);
-  } catch (err) {
-    console.error("Error en webhook:", err.message);
+    default:
+      await db.guardarSesion(telefono, "esperando_aceptacion", {});
+      return enviar(telefono, TXT.bienvenida);
+  }
+}
+
+// ── Rutas ────────────────────────────────────────────────────
+app.post("/webhook", async (req, res) => {
+  // Verifica que el mensaje venga de Twilio (si hay credenciales configuradas).
+  if (TWILIO_AUTH_TOKEN && process.env.PUBLIC_BASE_URL) {
+    const firma = req.get("X-Twilio-Signature") || "";
+    if (!twilio.validateRequest(TWILIO_AUTH_TOKEN, firma, BASE_URL + "/webhook", req.body)) {
+      return res.status(403).send("Firma inválida");
+    }
+  }
+  res.set("Content-Type", "text/xml").status(200).send("<Response></Response>");
+  const telefono = (req.body.From || "").replace("whatsapp:+", "");
+  const mensaje = (req.body.Body || "").trim();
+  if (!telefono || !mensaje) return;
+  try {
+    await atender(telefono, mensaje);
+  } catch (e) {
+    console.error("Error atendiendo a", telefono, e.message);
+    await enviar(telefono, "Tuvimos un problema técnico. Escriba *MENÚ* para empezar de nuevo o comuníquese al +57 313 829 1633.").catch(() => {});
   }
 });
 
@@ -423,40 +268,49 @@ app.post("/wompi-webhook", async (req, res) => {
   res.json({ status: "ok" });
   try {
     const evento = req.body;
-    if (evento && evento.event === "transaction.updated") {
-      const txn = evento.data && evento.data.transaction;
-      if (txn && txn.status === "APPROVED") {
-        const referencia = txn.reference;
-        const pago = pagosEsperados[referencia];
-        if (pago) {
-          await enviarMensaje(pago.telefono, "✅ Pago confirmado! Generando su reporte de procesos judiciales... un momento.");
-          try {
-            const pdfPath = await generarPDF(pago.termino, pago.procesos, pago.cantidad);
-            await enviarPDF(pago.telefono, pdfPath, pago.termino);
-            setTimeout(() => { try { fs.unlinkSync(pdfPath); } catch(e) {} }, 60000);
-          } catch (pdfError) {
-            console.error("Error generando PDF:", pdfError.message);
-            await enviarMensaje(pago.telefono, "Pago confirmado! Aqui esta el detalle de los procesos:\n\n" + pago.detalle);
-          }
-          delete pagosEsperados[referencia];
-        }
-      }
+    if (!wompi.eventoValido(evento)) return console.warn("Evento Wompi con firma inválida, descartado.");
+    const t = evento.data && evento.data.transaction;
+    if (evento.event === "transaction.updated" && t && t.status === "APPROVED" && String(t.reference).startsWith("PJP-")) {
+      const sol = await db.solicitudPorReferencia(t.reference);
+      if (sol && Number(t.amount_in_cents) === Number(sol.valor_centavos)) await procesarPago(t.reference, t.id);
     }
-  } catch (err) {
-    console.error("Error en wompi-webhook:", err.message);
+  } catch (e) {
+    console.error("Error en wompi-webhook:", e.message);
   }
 });
 
-app.get("/reporte/:filename", (req, res) => {
-  const filePath = `/tmp/${req.params.filename}`;
-  if (fs.existsSync(filePath)) {
+app.get("/reporte/:token.pdf", async (req, res) => {
+  try {
+    const sol = await db.solicitudPorToken(req.params.token);
+    if (!sol || !["pagado", "reporte_enviado", "complemento_enviado"].includes(sol.estado)) {
+      return res.status(404).send("Reporte no encontrado");
+    }
+    const pdf = await generarPDF(sol);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="${req.params.filename}"`);
-    res.sendFile(filePath);
-  } else {
-    res.status(404).send("Reporte no encontrado");
+    res.setHeader("Content-Disposition", `inline; filename="Perfil-${sol.referencia}.pdf"`);
+    res.send(pdf);
+  } catch (e) {
+    console.error("Error generando reporte:", e.message);
+    res.status(500).send("No fue posible generar el reporte");
   }
 });
 
-app.get("/", (req, res) => res.send("Bot Rama Judicial activo."));
-app.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
+app.get("/", (req, res) => res.send("Perfil Jurídico y Patrimonial activo."));
+
+// Respaldo: cada 3 minutos revisa en Wompi los pagos que no hayan llegado por aviso.
+async function revisarPagos() {
+  try {
+    for (const { referencia } of await db.solicitudesPendientesDePago(24)) {
+      const t = await wompi.transaccionAprobada(referencia);
+      if (t) await procesarPago(referencia, t.id);
+    }
+  } catch (e) {
+    console.error("Error en revisión de pagos:", e.message);
+  }
+}
+
+if (require.main === module) {
+  app.listen(PORT, () => console.log("Servidor en puerto " + PORT));
+  setInterval(revisarPagos, 3 * 60 * 1000);
+}
+module.exports = { app, atender, procesarPago };
