@@ -295,6 +295,9 @@ app.get("/reporte/:token.pdf", async (req, res) => {
   }
 });
 
+// Herramienta interna de la firma (Supernotariado)
+app.use(require("./admin")({ db, enviar, BASE_URL }));
+
 app.get("/", (req, res) => res.send("Perfil Jurídico y Patrimonial activo."));
 
 // Respaldo: cada 3 minutos revisa en Wompi los pagos que no hayan llegado por aviso.

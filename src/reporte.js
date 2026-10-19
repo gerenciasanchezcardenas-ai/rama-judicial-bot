@@ -178,6 +178,8 @@ function generarPDF(sol, ahora = new Date()) {
     const comoDemandado = procesos.filter((p) => posicion(sol.nombre, p) === "Demandado");
     if (comoDemandado.length) obs.push(`La persona consultada figura como demandada en ${comoDemandado.length} proceso(s). Conviene revisar si en ellos existen embargos o remanentes decretados, porque inciden en la prelación y en la posibilidad real de recaudo.`);
     if (procesos.some((p) => especialidad(p.despacho) === "laboral" && posicion(sol.nombre, p) === "Demandado")) obs.push("Hay procesos laborales en contra. Los créditos laborales gozan de prelación sobre los quirografarios.");
+    const inmuebles = (sol.snr_matriculas || []).length;
+    if (inmuebles) obs.push(`La persona consultada tiene ${inmuebles} inmueble(s) registrados a su nombre. El embargo se comunica a la Oficina de Registro de Instrumentos Públicos para su inscripción en el folio de matrícula (numeral 1 del artículo 593 del Código General del Proceso). Antes de solicitarlo conviene revisar el certificado de tradición, para conocer hipotecas, embargos previos o afectaciones a vivienda familiar.`);
     if (!obs.length) obs.push("Con la información disponible no se identificaron procesos ni contratos públicos que orienten medidas cautelares. El resultado de la Supernotariado completará el panorama patrimonial.");
     obs.forEach((t) => { parrafo("•  " + t); doc.moveDown(0.3); });
 

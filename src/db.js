@@ -58,3 +58,30 @@ module.exports = {
   leerSesion, guardarSesion, crearSolicitud, solicitudPorReferencia,
   solicitudPorToken, actualizarSolicitud, solicitudesPendientesDePago,
 };
+
+// ── Herramienta interna ─────────────────────────────────────
+async function solicitudesParaSNR() {
+  const { data } = await api.get("/pjp_solicitudes", {
+    params: {
+      estado: "in.(pagado,reporte_enviado)",
+      select: "referencia,nombre,tipo_persona,tipo_documento,documento,telefono,pagado_at,snr_vence_at,estado",
+      order: "snr_vence_at.asc",
+    },
+  });
+  return data;
+}
+
+async function complementosRecientes(limite = 15) {
+  const { data } = await api.get("/pjp_solicitudes", {
+    params: {
+      estado: "eq.complemento_enviado",
+      select: "referencia,nombre,tipo_documento,documento,complemento_at,snr_vence_at,snr_cargado_por",
+      order: "complemento_at.desc",
+      limit: limite,
+    },
+  });
+  return data;
+}
+
+module.exports.solicitudesParaSNR = solicitudesParaSNR;
+module.exports.complementosRecientes = complementosRecientes;

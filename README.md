@@ -18,6 +18,7 @@ Bot de WhatsApp de Sánchez & Cárdenas Consulting S.A.S. que reemplaza la consu
 - `src/secop.js`: SECOP II en datos abiertos (conjunto `jbjy-vk9h`).
 - `src/wompi.js`: enlace firmado, verificación de eventos y consulta de transacciones.
 - `src/reporte.js`: PDF, generado en memoria desde la base de datos.
+- `src/admin.js`: herramienta interna y envío del complemento.
 - `src/db.js`: Supabase (tablas `pjp_sesiones` y `pjp_solicitudes`).
 - `sql/schema.sql`: crear las tablas, una sola vez.
 
@@ -26,5 +27,6 @@ Bot de WhatsApp de Sánchez & Cárdenas Consulting S.A.S. que reemplaza la consu
 - `POST /webhook`: mensajes de Twilio (verifica la firma de Twilio).
 - `POST /wompi-webhook`: eventos de Wompi (verifica la firma de Wompi).
 - `GET /reporte/:token.pdf`: informe pagado.
+- `GET /admin`: herramienta interna para cargar el resultado de la Supernotariado (clave `ADMIN_CLAVE`).
 
 Las conversaciones y los pagos quedan en Supabase, de modo que un reinicio de Render no pierde nada. Además del aviso de Wompi, el servidor revisa cada 3 minutos los pagos pendientes.
