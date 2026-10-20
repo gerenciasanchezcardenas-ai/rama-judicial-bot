@@ -7,7 +7,12 @@ const KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const api = axios.create({
   baseURL: URL,
   timeout: 15000,
-  headers: { apikey: KEY, Authorization: "Bearer " + KEY, "Content-Type": "application/json" },
+  // Sirve con la llave "service_role" (JWT, empieza por eyJ) o con la nueva llave secreta (sb_secret_...).
+  // La nueva solo va en el encabezado apikey; enviarla como Bearer la hace rechazar.
+  headers: Object.assign(
+    { apikey: KEY, "Content-Type": "application/json" },
+    KEY.startsWith("eyJ") ? { Authorization: "Bearer " + KEY } : {}
+  ),
 });
 
 // ── Sesiones ────────────────────────────────────────────────
