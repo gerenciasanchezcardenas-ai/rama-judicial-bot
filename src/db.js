@@ -1,7 +1,8 @@
 // Acceso a Supabase por su API REST, con la llave service_role (solo en el servidor).
 const axios = require("axios");
 
-const URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "") + "/rest/v1";
+// Acepta la dirección con o sin "/rest/v1/" al final.
+const URL = (process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "").replace(/\/rest\/v1$/, "") + "/rest/v1";
 const KEY = process.env.SUPABASE_SERVICE_KEY || "";
 
 const api = axios.create({
