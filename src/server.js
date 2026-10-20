@@ -300,6 +300,29 @@ app.use(require("./admin")({ db, enviar, BASE_URL }));
 
 app.get("/", (req, res) => res.send("Perfil Jurídico y Patrimonial activo."));
 
+// Diagnóstico: indica qué está configurado y si la base de datos responde (no expone secretos).
+app.get("/salud", async (req, res) => {
+  const estado = {
+    supabase_url: !!process.env.SUPABASE_URL,
+    supabase_llave: !!process.env.SUPABASE_SERVICE_KEY,
+    twilio: !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_WHATSAPP_NUMBER),
+    wompi_publica: !!process.env.WOMPI_PUBLIC_KEY,
+    wompi_integridad: !!process.env.WOMPI_INTEGRITY_KEY,
+    wompi_eventos: !!process.env.WOMPI_EVENTS_SECRET,
+    wompi_privada: !!process.env.WOMPI_PRIVATE_KEY,
+    wompi_modo: (process.env.WOMPI_PUBLIC_KEY || "").startsWith("pub_test") ? "pruebas" : (process.env.WOMPI_PUBLIC_KEY ? "produccion" : "sin configurar"),
+    admin_clave: !!process.env.ADMIN_CLAVE,
+    base_publica: BASE_URL,
+  };
+  try {
+    await db.solicitudesPendientesDePago(1);
+    estado.base_de_datos = "conectada";
+  } catch (e) {
+    estado.base_de_datos = "error " + ((e.response && e.response.status) || "") + " " + ((e.response && e.response.data && (e.response.data.message || e.response.data.hint)) || e.message);
+  }
+  res.json(estado);
+});
+
 // Respaldo: cada 3 minutos revisa en Wompi los pagos que no hayan llegado por aviso.
 async function revisarPagos() {
   try {
