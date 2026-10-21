@@ -50,6 +50,72 @@ const HEADERS_MICROSITIO = {
   "Accept-Language": "es-CO,es;q=0.9",
 };
 
+// ── RESEND — envío de correo ──────────────────────────────────
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const CORREO_DESTINO = process.env.CORREO_NOTIFICACION || "gerenciasanchezcardenas@gmail.com";
+
+async function enviarCorreoNovedades(novedades) {
+  if (!RESEND_API_KEY || novedades.length === 0) return;
+  try {
+    const fecha = new Date().toLocaleDateString("es-CO", { timeZone: "America/Bogota", dateStyle: "full" });
+    const filas = novedades.map(n =>
+      `<tr>
+        <td style="padding:8px;border-bottom:1px solid #eee;">${n.proceso || n.radicado}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;">${n.radicado}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;">${n.actuacion}</td>
+        <td style="padding:8px;border-bottom:1px solid #eee;">${n.fecha}</td>
+      </tr>`
+    ).join("");
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;">
+        <div style="background:#1a1a2e;padding:20px;text-align:center;">
+          <h2 style="color:#c9a84c;margin:0;">SÁNCHEZ & CÁRDENAS</h2>
+          <p style="color:#fff;margin:5px 0 0;">Monitor Judicial — Novedades del día</p>
+        </div>
+        <div style="padding:20px;">
+          <p style="color:#333;">Se detectaron <strong>${novedades.length} novedad(es)</strong> en sus procesos judiciales el día <strong>${fecha}</strong>:</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;">
+            <thead>
+              <tr style="background:#f5f5f5;">
+                <th style="padding:8px;text-align:left;">Proceso</th>
+                <th style="padding:8px;text-align:left;">Radicado</th>
+                <th style="padding:8px;text-align:left;">Actuación</th>
+                <th style="padding:8px;text-align:left;">Fecha</th>
+              </tr>
+            </thead>
+            <tbody>${filas}</tbody>
+          </table>
+          <p style="margin-top:20px;">
+            <a href="https://monitor.sanchezcardenasconsulting.com"
+               style="background:#c9a84c;color:#fff;padding:10px 20px;text-decoration:none;border-radius:4px;">
+              Ver portal de monitoreo
+            </a>
+          </p>
+        </div>
+        <div style="background:#f5f5f5;padding:15px;text-align:center;font-size:12px;color:#666;">
+          Sánchez & Cárdenas Consulting S.A.S. · Bogotá, Colombia
+        </div>
+      </div>`;
+
+    await axios.post("https://api.resend.com/emails", {
+      from: "Monitor Judicial <onboarding@resend.dev>",
+      to: [CORREO_DESTINO],
+      subject: `⚖️ ${novedades.length} novedad(es) en sus procesos — ${fecha}`,
+      html,
+    }, {
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    });
+    console.log(`[✉] Correo enviado a ${CORREO_DESTINO} con ${novedades.length} novedad(es)`);
+  } catch (err) {
+    console.error("[enviarCorreoNovedades]", err.message);
+  }
+}
+
 // ── PAUSA entre llamadas ──────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -469,6 +535,7 @@ async function sincronizar() {
   let nuevasMicro = 0;
   let sinNovedad  = 0;
   let errores     = 0;
+  const novedadesParaCorreo = [];
 
   for (const radicado of radicados) {
     const cliente = radicado.clientes;
@@ -506,6 +573,12 @@ async function sincronizar() {
             if (insertada) {
               console.log(`      [✓] Nueva actuación (API) registrada`);
               nuevasRama++;
+              novedadesParaCorreo.push({
+                proceso: radicado.nombre || radicado.despacho || "",
+                radicado: radicado.numero,
+                actuacion: ultimaAct.actuacion,
+                fecha: ultimaAct.fechaActuacion,
+              });
               if (ultimaAct.fechaFinTermino && ultimaAct.fechaFinTermino !== "0001-01-01") {
                 const aid = await obtenerIdActuacionReciente(
                   radicado.id, ultimaAct.fechaActuacion, ultimaAct.actuacion
@@ -538,6 +611,12 @@ async function sincronizar() {
             if (insertada) {
               console.log(`      [✓] Nueva publicación (micrositio) registrada: ${pub.tituloPub}`);
               nuevasMicro++;
+              novedadesParaCorreo.push({
+                proceso: radicado.nombre || radicado.despacho || "",
+                radicado: radicado.numero,
+                actuacion: `[Micrositio] ${pub.tituloPub}`,
+                fecha: pub.fechaPub || new Date().toISOString().substring(0, 10),
+              });
             }
           }
         } else {
@@ -558,6 +637,13 @@ async function sincronizar() {
   console.log(`       Sin novedad                      : ${sinNovedad}`);
   console.log(`       Errores                          : ${errores}`);
   console.log("=".repeat(60));
+
+  // Enviar correo si hay novedades
+  if (novedadesParaCorreo.length > 0) {
+    await enviarCorreoNovedades(novedadesParaCorreo);
+  } else {
+    console.log("[✉] Sin novedades — no se envía correo");
+  }
 }
 
 // ── PUNTO DE ENTRADA ──────────────────────────────────────────
