@@ -473,12 +473,9 @@ async function sincronizar() {
   for (const radicado of radicados) {
     const cliente = radicado.clientes;
 
-    if (!cliente?.activo) {
+    // Solo se omite si el cliente está explícitamente inactivo
+    if (cliente && cliente.activo === false) {
       console.log(`  [SKIP] ${radicado.numero} — cliente inactivo`);
-      continue;
-    }
-    if (cliente?.plan_vence && new Date(cliente.plan_vence) < new Date()) {
-      console.log(`  [SKIP] ${radicado.numero} — plan vencido (${cliente.plan_vence})`);
       continue;
     }
 
