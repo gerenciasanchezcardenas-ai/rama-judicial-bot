@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const { consultarPorNombre, consultarPorRadicado } = require("./ramaJudicial");
+const { consultarPorNombre, consultarPorRadicado, obtenerActuaciones, linkMicrositio } = require("./src/ramaJudicial");
 
 const app = express();
 app.use(express.json());
@@ -75,16 +75,143 @@ app.post("/webhook", async (req, res) => {
 
     } else if (sesion.paso === "esperando_nombre") {
       const tipoPersona = sesion.tipoPersona || "nat";
-      sesiones[telefono] = { paso: "inicio" };
       await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
       const resultado = await consultarPorNombre(mensaje, tipoPersona);
-      respuesta = resultado.mensaje;
+
+      if (!resultado.tieneProcesos || resultado.procesos.length === 0) {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = resultado.mensaje || "No se encontraron procesos para ese nombre.";
+      } else if (resultado.procesos.length === 1) {
+        // Solo un proceso: ir directo a actuaciones
+        const proceso = resultado.procesos[0];
+        sesiones[telefono] = { paso: "inicio" };
+        await enviarMensaje(telefono, "⏳ Cargando actuaciones...");
+        const actuaciones = await obtenerActuaciones(proceso.idProceso, 7);
+        if (!actuaciones || actuaciones.length === 0) {
+          respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\nDespacho: " + (proceso.despacho || "N/A");
+        } else {
+          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, idProceso: proceso.idProceso, actuaciones };
+          let msg = `📋 *Actuaciones — ${proceso.llaveProceso}*\nDespacho: ${proceso.despacho || "N/A"}\n\n`;
+          for (let i = 0; i < actuaciones.length; i++) {
+            const a = actuaciones[i];
+            msg += `*${i + 1}.* ${a.actuacion}\n   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
+            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
+            msg += "\n";
+          }
+          msg += `Responda el *número* de la actuación para ver el documento, o *0* para salir.`;
+          respuesta = msg;
+        }
+      } else {
+        // Varios procesos: mostrarlos numerados para que el usuario elija
+        const lista = resultado.procesos.slice(0, 8);
+        sesiones[telefono] = { paso: "esperando_seleccion_proceso", procesos: lista };
+        let msg = `✅ Se encontraron *${resultado.cantidad}* proceso(s) para ese nombre.\n\n`;
+        msg += `Mostrando los primeros ${lista.length}:\n\n`;
+        for (let i = 0; i < lista.length; i++) {
+          const p = lista[i];
+          msg += `*${i + 1}.* ${p.llaveProceso || "N/A"}\n`;
+          msg += `   Despacho: ${(p.despacho || "N/A").substring(0, 60)}\n`;
+          msg += `   Fecha: ${(p.fechaProceso || "").substring(0, 10) || "N/A"}\n\n`;
+        }
+        msg += `Responda el *número* del proceso que desea consultar, o *0* para salir.`;
+        respuesta = msg;
+      }
+
+    } else if (sesion.paso === "esperando_seleccion_proceso") {
+      const num = parseInt(mensaje, 10);
+      const { procesos } = sesion;
+
+      if (mensaje === "0" || isNaN(num)) {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = "Consulta finalizada. Escriba cualquier mensaje para iniciar de nuevo.";
+      } else if (num < 1 || num > procesos.length) {
+        respuesta = `Por favor responda un número entre 1 y ${procesos.length}, o *0* para salir.`;
+      } else {
+        const proceso = procesos[num - 1];
+        await enviarMensaje(telefono, "⏳ Cargando actuaciones...");
+        const actuaciones = await obtenerActuaciones(proceso.idProceso, 7);
+        if (!actuaciones || actuaciones.length === 0) {
+          sesiones[telefono] = { paso: "inicio" };
+          respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\nDespacho: " + (proceso.despacho || "N/A");
+        } else {
+          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, idProceso: proceso.idProceso, actuaciones };
+          let msg = `📋 *Actuaciones — ${proceso.llaveProceso}*\nDespacho: ${proceso.despacho || "N/A"}\n\n`;
+          for (let i = 0; i < actuaciones.length; i++) {
+            const a = actuaciones[i];
+            msg += `*${i + 1}.* ${a.actuacion}\n   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
+            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
+            msg += "\n";
+          }
+          msg += `Responda el *número* de la actuación para ver el documento, o *0* para salir.`;
+          respuesta = msg;
+        }
+      }
 
     } else if (sesion.paso === "esperando_radicado") {
-      sesiones[telefono] = { paso: "inicio" };
+      const radicado = mensaje.replace(/\s/g, "");
       await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
-      const resultado = await consultarPorRadicado(mensaje);
-      respuesta = resultado.mensaje;
+
+      // Primero buscamos el proceso para obtener idProceso
+      const resultado = await consultarPorRadicado(radicado);
+
+      if (!resultado.tieneProcesos || resultado.procesos.length === 0) {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = resultado.mensaje || "No se encontró el proceso para ese radicado.";
+      } else {
+        const proceso = resultado.procesos[0];
+        const idProceso = proceso.idProceso;
+
+        // Traemos las últimas 7 actuaciones
+        const actuaciones = await obtenerActuaciones(idProceso, 7);
+
+        if (!actuaciones || actuaciones.length === 0) {
+          sesiones[telefono] = { paso: "inicio" };
+          respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\n\nDespacho: " + (proceso.despacho || "N/A");
+        } else {
+          // Guardamos en sesión: radicado, idProceso, lista de actuaciones
+          sesiones[telefono] = {
+            paso: "esperando_seleccion_actuacion",
+            radicado,
+            idProceso,
+            actuaciones,
+          };
+
+          let msg = `📋 *Últimas actuaciones — Radicado ${radicado}*\n`;
+          msg += `Despacho: ${proceso.despacho || "N/A"}\n\n`;
+          for (let i = 0; i < actuaciones.length; i++) {
+            const a = actuaciones[i];
+            msg += `*${i + 1}.* ${a.actuacion}\n`;
+            msg += `   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
+            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
+            msg += "\n";
+          }
+          msg += `Responda el *número* de la actuación para ver el documento en el micrositio, o *0* para salir.`;
+          respuesta = msg;
+        }
+      }
+
+    } else if (sesion.paso === "esperando_seleccion_actuacion") {
+      const num = parseInt(mensaje, 10);
+      const { radicado, actuaciones } = sesion;
+
+      if (mensaje === "0" || isNaN(num)) {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = "Consulta finalizada. Escriba cualquier mensaje para iniciar de nuevo.";
+      } else if (num < 1 || num > actuaciones.length) {
+        respuesta = `Por favor responda un número entre 1 y ${actuaciones.length}, o *0* para salir.`;
+      } else {
+        const act = actuaciones[num - 1];
+        sesiones[telefono] = { paso: "inicio" };
+
+        const link = linkMicrositio(radicado, act.idRegActuacion);
+
+        let msg = `📄 *${act.actuacion}*\n`;
+        msg += `📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
+        if (act.anotacion) msg += `📝 ${act.anotacion}\n`;
+        msg += `\n🔗 Consulte el documento en el micrositio:\n${link}`;
+        msg += `\n\n💼 Si desea descargar este documento, comuníquese con nosotros:\n📞 +57 313 829 1633`;
+        respuesta = msg;
+      }
 
     } else {
       sesiones[telefono] = { paso: "inicio" };
