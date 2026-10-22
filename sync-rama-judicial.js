@@ -222,14 +222,23 @@ function urlBusquedaDespacho(parsed) {
   const idDeptoCategory = ID_DEPTO_CATEGORY[parsed.codigoDpto] || "";
   const espMicro = especialidadMicrositio(parsed.especialidad);
 
+  // Rango de fechas: últimos 60 días hasta hoy
+  const hoy = new Date();
+  const hace60 = new Date(hoy);
+  hace60.setDate(hoy.getDate() - 60);
+  const fmt = (d) => d.toISOString().substring(0, 10);
+
   const params = new URLSearchParams({
     p_p_id: PORTLET_ID,
     p_p_lifecycle: "0",
     p_p_state: "normal",
     p_p_mode: "view",
     [`${PORTLET_PREFIX}action`]: "busqueda",
+    [`${PORTLET_PREFIX}fechaInicio`]: fmt(hace60),
+    [`${PORTLET_PREFIX}fechaFin`]: fmt(hoy),
     [`${PORTLET_PREFIX}idDepto`]: parsed.codigoDpto,
     [`${PORTLET_PREFIX}idMuni`]: parsed.codigoMunicipio,
+    [`${PORTLET_PREFIX}idEntidad`]: "31",
     [`${PORTLET_PREFIX}idEspecialidad`]: espMicro,
     [`${PORTLET_PREFIX}idDespacho`]: parsed.codigoDespacho,
     [`${PORTLET_PREFIX}verTotales`]: "true",
@@ -242,9 +251,10 @@ function urlBusquedaDespacho(parsed) {
   return `${MICROSITIO_BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
 }
 
-// 2d. Llamar al micrositio y extraer la lista de publicaciones recientes.
-//     Devuelve array de { titulo, fechaPublicacion, articleId }
-async function obtenerPublicacionesDespacho(parsed) {
+// 2d. Llamar al micrositio y buscar directamente si el fragmento del radicado
+//     aparece en la lista de PDFs del despacho.
+//     Devuelve array de { nombre, url, fecha } para los PDFs que coinciden.
+async function buscarPDFsEnDespacho(parsed) {
   const url = urlBusquedaDespacho(parsed);
   try {
     const resp = await axios.get(url, {
@@ -254,45 +264,37 @@ async function obtenerPublicacionesDespacho(parsed) {
     });
     const html = resp.data || "";
 
-    // Extraer publicaciones del HTML
-    // Cada publicación tiene un botón "VER DETALLE" con articleId en su href
-    const publicaciones = [];
-
-    // Patrón: articleId=XXXXXXX aparece en los links de detalle
-    const regexArticle = new RegExp(
-      `${PORTLET_PREFIX}articleId=(\\d+)[^"]*${PORTLET_PREFIX}nomDespacho`,
-      "g"
+    // Los PDFs aparecen como links: <a href="...">2023-00682.pdf</a>
+    // o como texto: 2023-00682.pdf con fecha de incorporación
+    const fragmento = parsed.fragmentoBusqueda; // ej: "2023-00682"
+    const regexPDF = new RegExp(
+      `href="([^"]*${fragmento}[^"]*\\.pdf)"[^>]*>\\s*([^<]+\\.pdf)`,
+      "gi"
     );
 
-    // Extraer articleId y título de cada card
-    // El HTML tiene: <h2 ...>TÍTULO</h2> ... articleId=XXX
-    const regexCard = /<h2[^>]*class="[^"]*titulo[^"]*"[^>]*>([\s\S]*?)<\/h2>[\s\S]*?articleId=(\d+)/gi;
+    const encontrados = [];
     let m;
-    while ((m = regexCard.exec(html)) !== null) {
-      const titulo = m[1].replace(/<[^>]+>/g, "").trim();
-      const articleId = m[2];
-      publicaciones.push({ titulo, articleId });
+    while ((m = regexPDF.exec(html)) !== null) {
+      const urlPdf = m[1].startsWith("http") ? m[1] : `${MICROSITIO_BASE}${m[1]}`;
+      encontrados.push({ nombre: m[2].trim(), url: urlPdf });
     }
 
-    // Si el regex anterior no capturó nada, intentar patrón alternativo
-    if (publicaciones.length === 0) {
-      const regexAlt = /articleId=(\d+)/g;
-      const fechaRegex = /Fecha de [Pp]ublicaci[oó]n.*?(\d{4}-\d{2}-\d{2})/g;
-      const idsSet = new Set();
-      let ma;
-      while ((ma = regexAlt.exec(html)) !== null) {
-        const aid = ma[1];
-        if (!idsSet.has(aid)) {
-          idsSet.add(aid);
-          publicaciones.push({ titulo: "", articleId: aid });
-        }
+    // Patrón alternativo: buscar el nombre del archivo sin href
+    if (encontrados.length === 0) {
+      const regexNombre = new RegExp(`(${fragmento}[\\w\\-\\.]*\\.pdf)`, "gi");
+      let mn;
+      while ((mn = regexNombre.exec(html)) !== null) {
+        encontrados.push({ nombre: mn[1].trim(), url: "" });
       }
     }
 
-    console.log(`      [micrositio] Publicaciones encontradas en despacho: ${publicaciones.length}`);
-    return publicaciones.slice(0, 20); // máximo 20 publicaciones recientes
+    // Contar total de PDFs en la página para log
+    const totalPDFs = (html.match(/\.pdf/gi) || []).length;
+    console.log(`      [micrositio] PDFs en despacho: ~${totalPDFs}, coincidencias "${fragmento}": ${encontrados.length}`);
+
+    return encontrados;
   } catch (err) {
-    console.error(`[obtenerPublicacionesDespacho]:`, err.message);
+    console.error(`[buscarPDFsEnDespacho]:`, err.message, err.response?.status || "");
     return [];
   }
 }
@@ -380,7 +382,7 @@ async function buscarDocumentosEnPublicacion(articleId, fragmento, parsed) {
 }
 
 // 2f. Función principal del micrositio: dado un radicado,
-//     retorna las publicaciones que mencionan ese proceso
+//     retorna los PDFs encontrados para ese proceso
 async function consultarMicrositio(numeroRadicado) {
   const parsed = parsearRadicado(numeroRadicado);
   if (!parsed) {
@@ -390,30 +392,19 @@ async function consultarMicrositio(numeroRadicado) {
 
   console.log(`      [micrositio] Consultando despacho ${parsed.codigoDespacho}, proceso ${parsed.fragmentoBusqueda}`);
 
-  // Paso 1: obtener lista de publicaciones del despacho
   await sleep(1500);
-  const publicaciones = await obtenerPublicacionesDespacho(parsed);
-  if (publicaciones.length === 0) return [];
+  const pdfs = await buscarPDFsEnDespacho(parsed);
 
-  // Paso 2: revisar cada publicación buscando documentos del radicado
-  const resultados = [];
-  for (const pub of publicaciones) {
-    await sleep(1000);
-    const detalle = await buscarDocumentosEnPublicacion(
-      pub.articleId,
-      parsed.fragmentoBusqueda,
-      parsed
-    );
-    if (detalle && detalle.documentos.length > 0) {
-      resultados.push({
-        ...detalle,
-        fragmento: parsed.fragmentoBusqueda,
-      });
-    }
-    if (resultados.length >= 3) break; // máximo 3 publicaciones con resultados
-  }
+  if (pdfs.length === 0) return [];
 
-  return resultados;
+  // Retornar en el mismo formato que espera el resto del código
+  return [{
+    articleId: "directo",
+    tituloPub: `Documentos proceso ${parsed.fragmentoBusqueda}`,
+    fechaPub: new Date().toISOString().substring(0, 10),
+    documentos: pdfs,
+    fragmento: parsed.fragmentoBusqueda,
+  }];
 }
 
 // ============================================================
