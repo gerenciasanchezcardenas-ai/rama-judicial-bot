@@ -159,25 +159,17 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const { despachoCod, year, consec } = parsed;
     console.log("Micrositio - radicado:", radicado, "| despachoCod:", despachoCod, "| idRegActuacion:", idRegActuacion);
 
-    // En Render, Puppeteer no descarga Chrome automáticamente.
-    // Buscar un ejecutable disponible en el sistema.
-    const { execSync } = require("child_process");
-    let executablePath;
-    try {
-      executablePath = execSync("which chromium-browser || which chromium || which google-chrome || which google-chrome-stable", { encoding: "utf8" }).trim().split("\n")[0];
-    } catch(_) { executablePath = null; }
-    // Fallback: ruta común en Render/Linux
-    const candidates = [
-      executablePath,
-      "/usr/bin/chromium-browser",
-      "/usr/bin/chromium",
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/opt/google/chrome/chrome",
-    ].filter(Boolean);
+    // Usar la ruta que puppeteer instaló durante postinstall (npx puppeteer browsers install chrome)
     const fs2 = require("fs");
+    let puppeteerExec;
+    try { puppeteerExec = puppeteer.executablePath(); } catch(_) { puppeteerExec = null; }
+    // Fallback: rutas del sistema
+    const { execSync } = require("child_process");
+    let sysExec;
+    try { sysExec = execSync("which chromium-browser || which chromium || which google-chrome || which google-chrome-stable", { encoding: "utf8" }).trim().split("\n")[0]; } catch(_) { sysExec = null; }
+    const candidates = [puppeteerExec, sysExec, "/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome", "/opt/google/chrome/chrome"].filter(Boolean);
     const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
-    console.log("Chromium candidates:", candidates, "| found:", foundExec);
+    console.log("Puppeteer executablePath:", puppeteerExec, "| found:", foundExec);
 
     const launchOpts = {
       headless: true,
