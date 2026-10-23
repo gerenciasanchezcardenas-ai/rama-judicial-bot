@@ -144,10 +144,135 @@ async function enviarPorCorreo(destinatario, asunto, cuerpo, adjunto) {
   return res.data;
 }
 
-// Navega el micrositio aplicando los filtros via Select2/jQuery y descarga
-// el documento de la actuación con el idRegActuacion dado.
+// Obtiene el documento PDF del micrositio de publicaciones procesales
+// usando HTTP puro (axios) — sin Puppeteer ni Chrome.
+// Flujo: POST búsqueda → extraer articleId del radicado → GET detalle → extraer uuid → descargar PDF
 // Retorna { tipo, data, ext } o null si falla.
 async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActuacion) {
+  const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
+  const PORTLET = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
+  const GROUP_ID = "6098902";
+  const HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-CO,es;q=0.9",
+  };
+
+  try {
+    const parsed = parsearRadicado(radicado);
+    if (!parsed) { console.error("capturar: radicado inválido:", radicado); return null; }
+
+    // Mapas para convertir códigos del radicado a nombres del portal
+    const DEPTOS = { "11": "BOGOTÁ", "05": "ANTIOQUIA", "76": "VALLE DEL CAUCA", "08": "ATLÁNTICO", "13": "BOLÍVAR", "17": "CALDAS", "18": "CAQUETÁ", "19": "CAUCA", "20": "CESAR", "23": "CÓRDOBA", "25": "CUNDINAMARCA", "27": "CHOCÓ", "41": "HUILA", "44": "LA GUAJIRA", "47": "MAGDALENA", "50": "META", "52": "NARIÑO", "54": "NORTE DE SANTANDER", "63": "QUINDÍO", "66": "RISARALDA", "68": "SANTANDER", "70": "SUCRE", "73": "TOLIMA" };
+    const ENTIDADES = { "40": "JUZGADO MUNICIPAL", "03": "JUZGADO DE CIRCUITO", "01": "TRIBUNAL SUPERIOR", "02": "CORTE SUPREMA" };
+    const ESPECIALIDADES = { "01": "CIVIL", "02": "FAMILIA", "03": "LABORAL", "04": "PENAL", "05": "ADMINISTRATIVO", "06": "AGRARIO", "07": "COMERCIAL", "08": "PROMISCUO", "09": "PENAL MUNICIPAL", "10": "CIVIL MUNICIPAL", "28": "CIVIL", "32": "CIVIL" };
+
+    const nomDepto = DEPTOS[parsed.dep] || parsed.dep;
+    const nomEntidad = ENTIDADES[parsed.tipo] || "JUZGADO DE CIRCUITO";
+    const nomEsp = ESPECIALIDADES[parsed.esp] || "CIVIL";
+
+    // Fecha de la actuación en formato yyyy-mm-dd
+    const fechaStr = fechaActuacion ? fechaActuacion.substring(0, 10) : new Date().toISOString().substring(0, 10);
+    // Buscar en rango ±3 días por si hay diferencia entre fecha actuación y fecha publicación
+    const fInicio = new Date(fechaStr); fInicio.setDate(fInicio.getDate() - 1);
+    const fFin = new Date(fechaStr); fFin.setDate(fFin.getDate() + 3);
+    const fmt = d => d.toISOString().substring(0, 10);
+
+    console.log(`Micrositio HTTP: depto=${nomDepto} entidad=${nomEntidad} esp=${nomEsp} despacho=${parsed.despachoCod} fecha=${fechaStr}`);
+
+    // 1. GET página principal para obtener cookies de sesión Liferay
+    const sessionResp = await axios.get(`${BASE}/web/publicaciones-procesales/inicio`, {
+      headers: HEADERS, timeout: 20000, maxRedirects: 5
+    });
+    const cookies = (sessionResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
+    console.log("Sesión Liferay OK, cookies:", cookies.substring(0, 80));
+
+    // Extraer el nombre exacto del despacho del HTML de la página (los selects tienen los valores reales)
+    // Buscar en el HTML opciones que contengan el código del despacho
+    const htmlPagina = sessionResp.data || "";
+
+    // 2. POST búsqueda — replicar exactamente el formulario del portlet
+    const radicadoLimpio = radicado.replace(/\s/g, "");
+    const formData = new URLSearchParams();
+    formData.append("p_p_id", PORTLET);
+    formData.append("p_p_lifecycle", "1");
+    formData.append("p_p_state", "normal");
+    formData.append("p_p_mode", "view");
+    formData.append(`_${PORTLET}_javax.portlet.action`, "buscarPublicaciones");
+    formData.append(`_${PORTLET}_radicado`, radicadoLimpio);
+    formData.append(`_${PORTLET}_fechaInicio`, fmt(fInicio));
+    formData.append(`_${PORTLET}_fechaFin`, fmt(fFin));
+
+    console.log("POST búsqueda con radicado:", radicadoLimpio, "fechas:", fmt(fInicio), "→", fmt(fFin));
+    const busqResp = await axios.post(`${BASE}/web/publicaciones-procesales/inicio`, formData, {
+      headers: { ...HEADERS, "Content-Type": "application/x-www-form-urlencoded", "Cookie": cookies },
+      timeout: 25000, maxRedirects: 5
+    });
+
+    const htmlBusq = busqResp.data || "";
+    console.log("Respuesta búsqueda, bytes:", htmlBusq.length);
+
+    // 3. Extraer articleId de los resultados — buscar links de detalle que contengan el radicado
+    // Patrón: articleId=XXXXXXX en los links de VER DETALLE
+    const articleIds = [];
+    const reArticle = /articleId=(\d+)/g;
+    let m;
+    while ((m = reArticle.exec(htmlBusq)) !== null) {
+      if (!articleIds.includes(m[1])) articleIds.push(m[1]);
+    }
+    console.log("articleIds encontrados:", articleIds);
+
+    if (articleIds.length === 0) {
+      console.log("No se encontraron publicaciones. HTML muestra:", htmlBusq.substring(0, 300));
+      return null;
+    }
+
+    // Usar el primer articleId (el más reciente si hay varios)
+    const articleId = articleIds[0];
+
+    // 4. GET detalle del artículo para obtener uuid del documento
+    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&_${PORTLET}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&_${PORTLET}_articleId=${articleId}`;
+    console.log("GET detalle articleId:", articleId);
+    const detalleResp = await axios.get(detalleUrl, {
+      headers: { ...HEADERS, "Cookie": cookies }, timeout: 20000, maxRedirects: 5
+    });
+    const htmlDetalle = detalleResp.data || "";
+
+    // 5. Extraer uuid del documento — patrón: uuid=XXXX&groupId=6098902
+    const reUuid = /uuid=([a-f0-9\-]{30,40})&groupId=(\d+)/i;
+    const mUuid = reUuid.exec(htmlDetalle);
+    if (!mUuid) {
+      // Intentar también patrón alternativo
+      const reUuid2 = /get_file\?uuid=([a-f0-9\-]{30,40})/i;
+      const mUuid2 = reUuid2.exec(htmlDetalle);
+      if (!mUuid2) {
+        console.log("uuid no encontrado en detalle. HTML:", htmlDetalle.substring(0, 500));
+        return null;
+      }
+      mUuid[1] = mUuid2[1];
+    }
+    const uuid = mUuid[1];
+    const groupId = mUuid[2] || GROUP_ID;
+    const pdfUrl = `${BASE}/c/document_library/get_file?uuid=${uuid}&groupId=${groupId}`;
+    console.log("PDF URL:", pdfUrl);
+
+    // 6. Descargar el PDF
+    const pdfResp = await axios.get(pdfUrl, {
+      headers: { ...HEADERS, "Cookie": cookies },
+      responseType: "arraybuffer", timeout: 30000
+    });
+    const pdfBuffer = Buffer.from(pdfResp.data);
+    console.log("PDF descargado, bytes:", pdfBuffer.length);
+    return { tipo: "pdf", data: pdfBuffer, ext: "pdf" };
+
+  } catch (e) {
+    console.error("Error capturarMicrositio:", e.message, e.response?.status);
+    return null;
+  }
+}
+
+// FUNCIÓN ANTIGUA CON PUPPETEER — ya no se usa, reemplazada por la de arriba
+async function capturarScreenshotMicrositioPuppeteer(radicado, idRegActuacion, fechaActuacion) {
   let browser;
   try {
     const puppeteer = require("puppeteer");
