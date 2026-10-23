@@ -27,13 +27,20 @@ async function enviarMensaje(telefono, texto) {
   const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
   const from = TWILIO_WHATSAPP_NUMBER.startsWith("whatsapp:") ? TWILIO_WHATSAPP_NUMBER : `whatsapp:${TWILIO_WHATSAPP_NUMBER}`;
   const to = telefono.startsWith("whatsapp:") ? telefono : `whatsapp:${telefono}`;
-  await axios.post(url,
-    new URLSearchParams({ From: from, To: to, Body: texto }).toString(),
-    {
-      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
-      headers: { "Content-Type": "application/x-www-form-urlencoded" }
-    }
-  );
+  console.log("Enviando mensaje Twilio - From:", from, "To:", to);
+  try {
+    const res = await axios.post(url,
+      new URLSearchParams({ From: from, To: to, Body: texto }).toString(),
+      {
+        auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      }
+    );
+    console.log("Twilio OK:", res.data?.sid);
+  } catch (e) {
+    console.error("Twilio error:", e.response?.status, JSON.stringify(e.response?.data));
+    throw e;
+  }
 }
 
 async function enviarDocumento(telefono, pdfBuffer, filename, caption) {
