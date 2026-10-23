@@ -4,6 +4,8 @@ on:
   schedule:
     # 6:00 AM hora Bogotá = 11:00 AM UTC (L-V)
     - cron: '0 11 * * 1-5'
+    # 5:00 PM hora Bogotá = 10:00 PM UTC (L-V)
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:  # permite correrlo manualmente desde GitHub
 
 jobs:
