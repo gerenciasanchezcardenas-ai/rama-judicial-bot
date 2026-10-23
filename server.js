@@ -113,7 +113,7 @@ async function enviarPorCorreo(destinatario, asunto, cuerpo, adjunto) {
   const RESEND_API_KEY = process.env.RESEND_API_KEY;
   if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY no configurado");
   const payload = {
-    from: "Sánchez & Cárdenas <onboarding@resend.dev>",
+    from: "Sánchez & Cárdenas <notificaciones@sanchezcardenasconsulting.com>",
     to: [destinatario],
     subject: asunto,
     html: cuerpo,
@@ -325,26 +325,8 @@ app.post("/webhook", async (req, res) => {
         if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
         if (tieneMicrositio(act)) {
           const docUrl = micrositioUrl(radicado, act.idRegActuacion);
-          sesiones[telefono] = { paso: "inicio" };
-          await enviarMensaje(telefono, msg + `⏳ Obteniendo el documento y enviando al correo registrado...`);
-          try {
-            const resultado = await capturarScreenshotMicrositio(docUrl);
-            const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
-            const asunto = `Actuación judicial: ${act.actuacion} — ${act.fechaActuacion || ""}`;
-            const cuerpoHtml = `<p><b>Actuación:</b> ${act.actuacion}</p><p><b>Fecha:</b> ${act.fechaActuacion || "N/A"}</p>${act.anotacion ? `<p><b>Anotación:</b> ${act.anotacion}</p>` : ""}<p><b>Radicado:</b> ${radicado}</p>`;
-            const correoDestino = "gerenciasanchezcardenas@gmail.com";
-            if (resultado) {
-              const filename = `${base}.${resultado.ext}`;
-              await enviarPorCorreo(correoDestino, asunto, cuerpoHtml, { filename, buffer: resultado.data });
-              await enviarMensaje(telefono, `✅ Documento enviado a *${correoDestino}*\n\n📞 +57 313 829 1633`);
-            } else {
-              await enviarPorCorreo(correoDestino, asunto, cuerpoHtml + `<p><a href="${docUrl}">Ver documento en el micrositio</a></p>`, null);
-              await enviarMensaje(telefono, `✅ Enlace al documento enviado a *${correoDestino}*\n\n📞 +57 313 829 1633`);
-            }
-          } catch (e) {
-            console.error("Error enviando correo:", e.message);
-            await enviarMensaje(telefono, `✅ Documento disponible en:\n🔗 ${docUrl}\n\n📞 +57 313 829 1633`);
-          }
+          sesiones[telefono] = { paso: "esperando_correo_micrositio", act, docUrl, radicado };
+          await enviarMensaje(telefono, msg + `📧 Por favor ingrese su *correo electrónico* para enviarle el documento, o *0* para cancelar.`);
           return;
         } else {
           msg += `❌ Esta actuación no tiene documento publicado en el micrositio.`;
