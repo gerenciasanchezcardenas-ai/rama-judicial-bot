@@ -45,29 +45,26 @@ async function enviarMensaje(telefono, texto) {
   }
 }
 
-async function enviarDocumento(telefono, pdfBuffer, filename, caption) {
+async function enviarArchivo(telefono, buffer, filename, caption) {
   try {
-    // Guardar PDF temporalmente y servirlo como URL pública
     const tmpDir = path.join(__dirname, "tmp_pdfs");
     if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
     const tmpFile = path.join(tmpDir, filename);
-    fs.writeFileSync(tmpFile, pdfBuffer);
-    const pdfUrl = `https://rama-judicial-bot.onrender.com/pdf/${encodeURIComponent(filename)}`;
-    // Enviar como media via Twilio
+    fs.writeFileSync(tmpFile, buffer);
+    const fileUrl = `https://rama-judicial-bot.onrender.com/pdf/${encodeURIComponent(filename)}`;
     const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
     const from = TWILIO_WHATSAPP_NUMBER.startsWith("whatsapp:") ? TWILIO_WHATSAPP_NUMBER : `whatsapp:${TWILIO_WHATSAPP_NUMBER}`;
     const to = telefono.startsWith("whatsapp:") ? telefono : `whatsapp:${telefono}`;
     await axios.post(url,
-      new URLSearchParams({ From: from, To: to, Body: caption || filename, MediaUrl: pdfUrl }).toString(),
+      new URLSearchParams({ From: from, To: to, Body: caption || filename, MediaUrl: fileUrl }).toString(),
       {
         auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
         headers: { "Content-Type": "application/x-www-form-urlencoded" }
       }
     );
-    // Limpiar archivo después de 5 minutos
     setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch(e) {} }, 5 * 60 * 1000);
   } catch (e) {
-    console.error("Error enviando documento:", e.response?.data || e.message);
+    console.error("Error enviando archivo:", e.response?.data || e.message);
     await enviarMensaje(telefono, caption || filename);
   }
 }
@@ -324,11 +321,13 @@ app.post("/webhook", async (req, res) => {
         if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
         if (tieneMicrositio(act)) {
           const docUrl = micrositioUrl(radicado, act.idRegActuacion);
-          await enviarMensaje(telefono, msg + `⏳ Descargando documento del micrositio...`);
-          const pdf = await descargarPdfMicrositio(docUrl);
-          if (pdf) {
-            const filename = `${(radicado || "doc").replace(/\s/g, "_")}_${act.fechaActuacion || "doc"}.pdf`;
-            await enviarDocumento(telefono, pdf, filename, `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`);
+          await enviarMensaje(telefono, msg + `⏳ Obteniendo documento del micrositio...`);
+          const resultado = await capturarScreenshotMicrositio(docUrl);
+          if (resultado) {
+            const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
+            const filename = `${base}.${resultado.ext}`;
+            const caption = `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`;
+            await enviarArchivo(telefono, resultado.data, filename, caption);
           } else {
             await enviarMensaje(telefono, `✅ Documento disponible en el micrositio:\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}\n\n📞 +57 313 829 1633`);
           }
@@ -374,10 +373,11 @@ app.post("/wompi-webhook", async (req, res) => {
     await enviarMensaje(telefono, `✅ *¡Pago confirmado!* Gracias.\n\n⏳ Descargando el documento del micrositio...`);
     let enviado = false;
     if (docUrl) {
-      const pdf = await descargarPdfMicrositio(docUrl);
-      if (pdf) {
-        const filename = `${(radicado || "doc").replace(/\s/g, "_")}_${act.fechaActuacion || "doc"}.pdf`;
-        await enviarDocumento(telefono, pdf, filename, `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`);
+      const resultado = await capturarScreenshotMicrositio(docUrl);
+      if (resultado) {
+        const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
+        const filename = `${base}.${resultado.ext}`;
+        await enviarArchivo(telefono, resultado.data, filename, `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`);
         enviado = true;
       }
     }
@@ -396,7 +396,11 @@ app.get("/pdf/:filename", (req, res) => {
   const filename = req.params.filename;
   const filepath = path.join(__dirname, "tmp_pdfs", filename);
   if (fs.existsSync(filepath)) {
-    res.setHeader("Content-Type", "application/pdf");
+    const ext = path.extname(filename).toLowerCase();
+    const ct = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
+              : ext === ".png" ? "image/png"
+              : "application/pdf";
+    res.setHeader("Content-Type", ct);
     res.sendFile(filepath);
   } else {
     res.status(404).send("Documento no disponible");
