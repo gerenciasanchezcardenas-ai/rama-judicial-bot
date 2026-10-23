@@ -238,27 +238,17 @@ app.post("/webhook", async (req, res) => {
       } else {
         const act = actuaciones[num - 1];
         sesiones[telefono] = { paso: "inicio" };
-        if (!tieneMicrositio(act)) {
-          let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
-          if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
-          msg += `❌ Esta actuación *no tiene documento publicado* en el micrositio.\n\nComuníquese con nosotros:\n📞 +57 313 829 1633`;
-          respuesta = msg;
+        // MODO PRUEBA: sin cobro — mostrar info de la actuación directamente
+        let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
+        if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
+        if (tieneMicrositio(act)) {
+          const docUrl = micrositioUrl(radicado, act.idRegActuacion);
+          msg += `✅ Esta actuación tiene documento en el micrositio.\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}`;
         } else {
-          const referencia = `bot_${telefono}_${Date.now()}`;
-          const linkPago = await crearLinkPago(referencia, `Documento ${act.actuacion.substring(0, 50)}`);
-          if (!linkPago) {
-            respuesta = `⚠️ No podemos procesar el pago en línea ahora.\nComuníquese con nosotros:\n📞 +57 313 829 1633`;
-          } else {
-            const docUrl = micrositioUrl(radicado, act.idRegActuacion);
-            pendingPayments[referencia] = { telefono, act, radicado, micrositioUrl: docUrl };
-            let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
-            if (act.anotacion) msg += `📝 ${act.anotacion.substring(0, 120)}\n\n`;
-            msg += `✅ *Esta actuación tiene documento publicado en el micrositio.*\n\n`;
-            msg += `💳 Para recibir el documento en este chat, realice el pago de *$50.000 COP*:\n\n🔗 ${linkPago}\n\n`;
-            msg += `_Una vez confirmado el pago, le enviaremos el PDF automáticamente._`;
-            respuesta = msg;
-          }
+          msg += `❌ Esta actuación no tiene documento publicado en el micrositio.`;
         }
+        msg += `\n\n📞 Más información: +57 313 829 1633`;
+        respuesta = msg;
       }
 
     } else {
