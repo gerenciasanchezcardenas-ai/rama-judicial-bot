@@ -409,4 +409,72 @@ app.get("/health", (req, res) =>
   res.json({ estado: "OK", servicio: "Sánchez & Cárdenas – Bot Rama Judicial", hora: new Date().toISOString() })
 );
 
+// Endpoint de diagnóstico: ver qué devuelve el micrositio para un idRegActuacion
+app.get("/debug-micrositio/:idReg", async (req, res) => {
+  const idReg = req.params.idReg;
+  const articleId = req.query.articleId || "2023-00682";
+  const PORTLET = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
+  const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,*/*",
+    "Accept-Language": "es-CO,es;q=0.9",
+  };
+  try {
+    // 1. Página principal lifecycle=0
+    const url0 = `${BASE}/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${PORTLET}&p_p_lifecycle=0&_${PORTLET}_articleId=${articleId}&_${PORTLET}_idRegActuacion=${idReg}`;
+    const r0 = await axios.get(url0, { timeout: 30000, headers });
+    const html = r0.data || "";
+
+    // 2. Buscar links en el HTML
+    const links = [];
+    const reHref = /href="([^"]+)"/gi;
+    let m;
+    while ((m = reHref.exec(html)) !== null) {
+      if (m[1].includes("document_library") || m[1].includes(".pdf") || m[1].includes("lifecycle=2")) {
+        links.push(m[1]);
+      }
+    }
+
+    // 3. Buscar en scripts
+    const scriptUuids = [];
+    const reUuid = /['"]([\w-]{36})['"]/g;
+    let mu;
+    while ((mu = reUuid.exec(html)) !== null) {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(mu[1])) {
+        scriptUuids.push(mu[1]);
+      }
+    }
+
+    // 4. lifecycle=2 directo con resourceId conocidos
+    const lifecycle2Results = {};
+    for (const resId of ["descargarDocumento", "getDocumento", "downloadDocument", "serveResource"]) {
+      try {
+        const url2 = `${BASE}/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${PORTLET}&p_p_lifecycle=2&p_p_resource_id=${resId}&_${PORTLET}_idRegActuacion=${idReg}&_${PORTLET}_articleId=${articleId}`;
+        const r2 = await axios.get(url2, { timeout: 10000, headers, maxRedirects: 5 });
+        lifecycle2Results[resId] = {
+          status: r2.status,
+          contentType: r2.headers["content-type"],
+          dataLength: (r2.data || "").length || r2.data?.byteLength,
+          dataSnippet: typeof r2.data === "string" ? r2.data.substring(0, 200) : "binary"
+        };
+      } catch(e) {
+        lifecycle2Results[resId] = { error: e.message, status: e.response?.status };
+      }
+    }
+
+    res.json({
+      url0,
+      status0: r0.status,
+      htmlLength: html.length,
+      htmlSnippet: html.substring(0, 500),
+      linksEncontrados: links,
+      uuidsEncontrados: scriptUuids.slice(0, 5),
+      lifecycle2Results
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message, status: e.response?.status });
+  }
+});
+
 app.listen(PORT, () => console.log(`✅ Servidor activo en http://localhost:${PORT}`));
