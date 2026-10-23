@@ -175,34 +175,70 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     // 1. Navegar al micrositio
     console.log("Navegando al micrositio raíz...");
     await page.goto("https://publicacionesprocesales.ramajudicial.gov.co/", {
-      waitUntil: "networkidle2", timeout: 60000
+      waitUntil: "domcontentloaded", timeout: 60000
     });
-    await page.waitForTimeout(3000);
 
-    // 2. Seleccionar Despacho via jQuery/Select2
-    // Los selects son nativos pero Select2 los envuelve; jQuery está disponible en la página
-    // El select #despacho ya tiene las 5000+ opciones precargadas (no es lazy)
+    // Esperar a que el select #despacho tenga opciones (prueba hasta 30s)
+    console.log("Esperando que Select2 inicialice el select #despacho...");
+    let despachoListo = false;
+    for (let i = 0; i < 15; i++) {
+      await page.waitForTimeout(2000);
+      const count = await page.evaluate(() => {
+        const sel = document.getElementById('despacho');
+        return sel ? sel.options.length : -1;
+      });
+      console.log(`  intento ${i+1}: #despacho.options.length = ${count}`);
+      if (count > 10) { despachoListo = true; break; }
+    }
+    if (!despachoListo) {
+      console.warn("El select #despacho no cargó opciones a tiempo");
+    }
+
+    // Diagnóstico: qué selects existen en la página
+    const diagnostico = await page.evaluate(() => {
+      const selects = Array.from(document.querySelectorAll('select'));
+      return selects.map(s => ({ id: s.id, name: s.name, optCount: s.options.length, classes: s.className }));
+    });
+    console.log("Selects en página:", JSON.stringify(diagnostico));
+
+    // 2. Seleccionar Departamento primero (los 2 primeros dígitos del despachoCod)
+    const { dep } = parsed;
+    console.log("Seleccionando Departamento:", dep);
+    const depOk = await page.evaluate((depVal) => {
+      const sel = document.getElementById('departamento');
+      if (!sel) return 'no #departamento';
+      const opt = Array.from(sel.options).find(o => o.value.trim() === depVal);
+      if (!opt) return 'dep option no encontrado: ' + depVal + ' (opciones: ' + Array.from(sel.options).slice(0,5).map(o=>o.value).join(',') + ')';
+      if (typeof jQuery !== 'undefined') {
+        jQuery('#departamento').val(opt.value).trigger('change');
+        return 'ok-jquery:' + opt.value;
+      }
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'ok-native:' + opt.value;
+    }, dep);
+    console.log("Departamento resultado:", depOk);
+    await page.waitForTimeout(2000);
+
+    // 3. Seleccionar Despacho via jQuery/Select2
     console.log("Seleccionando Despacho:", despachoCod);
     const despachoOk = await page.evaluate((cod) => {
       const sel = document.getElementById('despacho');
       if (!sel) return 'no select#despacho';
-      // Buscar el option (puede tener espacio inicial en el value)
       const opt = Array.from(sel.options).find(o => o.value.trim() === cod);
-      if (!opt) return 'option no encontrado para: ' + cod;
-      // Seleccionar via jQuery para que Select2 lo reconozca
+      if (!opt) return 'option no encontrado: ' + cod + ' (total opts: ' + sel.options.length + ', primeros: ' + Array.from(sel.options).slice(0,3).map(o=>o.value.trim()).join('|') + ')';
       if (typeof jQuery !== 'undefined') {
         jQuery('#despacho').val(opt.value).trigger('change');
         return 'ok-jquery:' + opt.value;
-      } else {
-        sel.value = opt.value;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        return 'ok-native:' + opt.value;
       }
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return 'ok-native:' + opt.value;
     }, despachoCod);
     console.log("Despacho resultado:", despachoOk);
     await page.waitForTimeout(1500);
 
-    // 3. Ajustar fechas (formato YYYY-MM-DD para input[type="date"])
+    // 4. Ajustar fechas
     if (fechaActuacion) {
       try {
         const fActuacion = new Date(fechaActuacion);
@@ -210,27 +246,39 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
         fInicio.setMonth(fInicio.getMonth() - 3);
         const fFin = new Date(fActuacion);
         fFin.setMonth(fFin.getMonth() + 1);
-        const fmt = d => d.toISOString().substring(0, 10); // YYYY-MM-DD
-        await page.evaluate((fi, ff) => {
-          // Los IDs son largos con el portletId
+        const fmt = d => d.toISOString().substring(0, 10);
+        const fechaOk = await page.evaluate((fi, ff) => {
           const inputs = document.querySelectorAll('input[type="date"]');
           if (inputs[0]) { inputs[0].value = fi; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
           if (inputs[1]) { inputs[1].value = ff; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
+          return `inputs encontrados: ${inputs.length}`;
         }, fmt(fInicio), fmt(fFin));
-        console.log("Fechas:", fmt(fInicio), "->", fmt(fFin));
+        console.log("Fechas:", fmt(fInicio), "->", fmt(fFin), "|", fechaOk);
       } catch(dateErr) { console.warn("Error ajustando fechas:", dateErr.message); }
     }
 
-    // 4. Clic en BUSCAR (el botón tiene id="buscar")
+    // 5. Clic en BUSCAR (id="buscar")
     console.log("Haciendo clic en BUSCAR...");
-    await page.evaluate(() => {
+    const buscarOk = await page.evaluate(() => {
       const btn = document.getElementById('buscar');
-      if (btn) btn.click();
+      if (btn) { btn.click(); return 'clicked'; }
+      // fallback: cualquier input submit
+      const sub = document.querySelector('input[type="submit"]');
+      if (sub) { sub.click(); return 'clicked-submit'; }
+      return 'no buscar encontrado';
     });
+    console.log("BUSCAR:", buscarOk);
     // Esperar que carguen los resultados
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(7000);
 
-    // 5. Buscar el documento con idRegActuacion en los resultados
+    // Diagnóstico: qué hay en la página de resultados
+    const htmlResumen = await page.evaluate(() => {
+      const body = document.body.innerText || document.body.textContent || '';
+      return body.substring(0, 800);
+    });
+    console.log("Página tras BUSCAR (primeros 800 chars):", htmlResumen);
+
+    // 6. Buscar el documento con idRegActuacion en los resultados
     console.log("Buscando documento con idRegActuacion:", idRegActuacion);
     let pdfUrl = null;
 
