@@ -719,7 +719,7 @@ app.post("/webhook", async (req, res) => {
         if (tieneMicrositio(act)) {
           const docUrl = micrositioUrl(radicado, act.idRegActuacion);
           sesiones[telefono] = { paso: "esperando_correo_micrositio", act, docUrl, radicado };
-          await enviarMensaje(telefono, msg + `📧 Por favor ingrese su *correo electrónico* para enviarle el documento, o *0* para cancelar.`);
+          await enviarMensaje(telefono, msg + `⚠️ *Nota:* Solo se pueden recuperar documentos publicados en los *últimos 60 días*.\n\n📧 Por favor ingrese su *correo electrónico* para enviarle el documento adjunto, o *0* para cancelar.`);
           return;
         } else {
           msg += `❌ Esta actuación no tiene documento publicado en el micrositio.`;
