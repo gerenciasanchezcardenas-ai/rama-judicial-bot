@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "sync": "node sync-rama-judicial.js"
+    "sync": "node sync-rama-judicial.js",
+    "postinstall": "node -e \"require('puppeteer').executablePath()\" 2>/dev/null || npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",

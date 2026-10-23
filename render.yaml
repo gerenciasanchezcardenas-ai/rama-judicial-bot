@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: rama-judicial-bot
+    env: node
+    buildCommand: npm install && node -e "const p=require('puppeteer'); p.executablePath && console.log('chrome ok')" || npx puppeteer browsers install chrome
+    startCommand: node server.js
+    envVars:
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer

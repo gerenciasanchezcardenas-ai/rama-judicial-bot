@@ -164,10 +164,33 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const { despachoCod, year, consec } = parsed;
     console.log("Micrositio - radicado:", radicado, "| despachoCod:", despachoCod, "| idRegActuacion:", idRegActuacion);
 
-    browser = await puppeteer.launch({
+    // En Render, Puppeteer no descarga Chrome automáticamente.
+    // Buscar un ejecutable disponible en el sistema.
+    const { execSync } = require("child_process");
+    let executablePath;
+    try {
+      executablePath = execSync("which chromium-browser || which chromium || which google-chrome || which google-chrome-stable", { encoding: "utf8" }).trim().split("\n")[0];
+    } catch(_) { executablePath = null; }
+    // Fallback: ruta común en Render/Linux
+    const candidates = [
+      executablePath,
+      "/usr/bin/chromium-browser",
+      "/usr/bin/chromium",
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/opt/google/chrome/chrome",
+    ].filter(Boolean);
+    const fs2 = require("fs");
+    const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
+    console.log("Chromium candidates:", candidates, "| found:", foundExec);
+
+    const launchOpts = {
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
-    });
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+    };
+    if (foundExec) launchOpts.executablePath = foundExec;
+
+    browser = await puppeteer.launch(launchOpts);
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
