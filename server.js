@@ -91,7 +91,7 @@ function micrositioUrl(radicado, idRegActuacion) {
     const num = r.substring(16, 21);
     const articleId = `${year}-${num}`;
     const portletId = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
-    return `https://www.ramajudicial.gov.co/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${portletId}&p_p_lifecycle=0&_${portletId}_articleId=${articleId}&_${portletId}_idRegActuacion=${idRegActuacion}`;
+    return `https://publicacionesprocesales.ramajudicial.gov.co/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${portletId}&p_p_lifecycle=0&_${portletId}_articleId=${articleId}&_${portletId}_idRegActuacion=${idRegActuacion}`;
   }
   return null;
 }
@@ -113,32 +113,68 @@ async function crearLinkPago(referencia, descripcion) {
 }
 
 async function descargarPdfMicrositio(url) {
+  const BASE_MICROSITIO = "https://publicacionesprocesales.ramajudicial.gov.co";
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
+    "Referer": BASE_MICROSITIO + "/"
+  };
   try {
-    const headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "es-CO,es;q=0.9",
-      "Referer": "https://publicacionesprocesales.ramajudicial.gov.co/"
-    };
-    // Primero cargamos la página del portlet para extraer el link del PDF
+    console.log("Descargando página micrositio:", url);
     const pageRes = await axios.get(url, { timeout: 30000, headers });
     const html = pageRes.data || "";
-    // Buscar el link del PDF en la página
-    const match = html.match(/href="([^"]*document_library\/get_file[^"]*)"/i)
-      || html.match(/href="([^"]*\.pdf[^"]*)"/i);
-    if (match) {
-      let pdfUrl = match[1];
-      if (pdfUrl.startsWith("/")) pdfUrl = "https://publicacionesprocesales.ramajudicial.gov.co" + pdfUrl;
-      console.log("PDF URL encontrada:", pdfUrl);
-      const pdfRes = await axios.get(pdfUrl, { responseType: "arraybuffer", timeout: 30000, headers });
-      if (pdfRes.headers["content-type"]?.includes("pdf") || pdfUrl.includes(".pdf")) {
-        return Buffer.from(pdfRes.data);
+    console.log("HTML micrositio length:", html.length, "status:", pageRes.status);
+
+    // Extraer la URL del PDF probando varios patrones
+    let pdfUrl = null;
+
+    // Patrón 1: document_library/get_file con uuid
+    const m1 = html.match(/["']((?:https?:\/\/[^"']*)?\/c\/document_library\/get_file[^"']*uuid=[^"']+)["']/i);
+    if (m1) pdfUrl = m1[1];
+
+    // Patrón 2: href con .pdf
+    if (!pdfUrl) {
+      const m2 = html.match(/href=["']([^"']*\.pdf[^"']*)["']/i);
+      if (m2) pdfUrl = m2[1];
+    }
+
+    // Patrón 3: src o data-url con document_library
+    if (!pdfUrl) {
+      const m3 = html.match(/["']((?:https?:\/\/[^"']*)?\/c\/document_library\/[^"']+)["']/i);
+      if (m3) pdfUrl = m3[1];
+    }
+
+    // Patrón 4: buscar en JS embebido (variables con uuid o fileUrl)
+    if (!pdfUrl) {
+      const m4 = html.match(/uuid['":\s]+['"]([0-9a-f-]{36})['"]/i);
+      if (m4) {
+        const uuid = m4[1];
+        // groupId predeterminado del micrositio
+        pdfUrl = `${BASE_MICROSITIO}/c/document_library/get_file?uuid=${uuid}&groupId=6098902`;
       }
     }
-    console.log("No se encontró link PDF en la página, html length:", html.length);
+
+    if (pdfUrl) {
+      if (pdfUrl.startsWith("/")) pdfUrl = BASE_MICROSITIO + pdfUrl;
+      console.log("PDF URL encontrada:", pdfUrl);
+      const pdfRes = await axios.get(pdfUrl, {
+        responseType: "arraybuffer",
+        timeout: 45000,
+        headers: { ...headers, "Accept": "application/pdf,*/*" }
+      });
+      const ct = pdfRes.headers["content-type"] || "";
+      if (ct.includes("pdf") || ct.includes("octet-stream") || pdfUrl.includes("get_file") || pdfUrl.includes(".pdf")) {
+        console.log("PDF descargado, bytes:", pdfRes.data.byteLength);
+        return Buffer.from(pdfRes.data);
+      }
+      console.log("Respuesta no es PDF, content-type:", ct);
+    } else {
+      console.log("No se encontró URL PDF en el HTML. Primeros 500 chars:", html.substring(0, 500));
+    }
     return null;
   } catch (e) {
-    console.error("Error descargando PDF:", e.message);
+    console.error("Error descargando PDF micrositio:", e.response?.status, e.message);
     return null;
   }
 }
