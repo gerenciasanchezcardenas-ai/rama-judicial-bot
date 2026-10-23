@@ -161,6 +161,10 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
   const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
   const GROUP_ID = "6098902";
   const PORTLET = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
+  // El código del despacho son los primeros 12 dígitos del radicado
+  // Ej: 11001400302820230068200 → despacho = 110014003028
+  // El portal los carga dinámicamente via combo?browserId=...
+  // El formulario usa IDs (no name) y llama buscarPublicaciones via AJAX con los valores de los selects
   const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
