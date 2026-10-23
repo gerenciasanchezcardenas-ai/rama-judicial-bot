@@ -7,11 +7,13 @@ const { consultarPorNombre, consultarPorRadicado, obtenerActuaciones } = require
 const app = express();
 
 app.use("/wompi-webhook", express.raw({ type: "application/json" }));
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.D360_API_KEY;
-const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
 
 const WOMPI_PRIVATE_KEY = process.env.WOMPI_PRIVATE_KEY || "prv_prod_2A43U6Iijwv3eV0gCV25a2Ab7qjQNePa";
 const WOMPI_EVENTS_SECRET = process.env.WOMPI_EVENTS_SECRET || "prod_events_Rm3upKCLaRYHoQki8QICIoQ6G2V9ShqA";
@@ -22,26 +24,21 @@ const sesiones = {};
 const pendingPayments = {};
 
 async function enviarMensaje(telefono, texto) {
-  await axios.post(API_URL,
-    { messaging_product: "whatsapp", to: telefono, type: "text", text: { body: texto } },
-    { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+  const from = TWILIO_WHATSAPP_NUMBER.startsWith("whatsapp:") ? TWILIO_WHATSAPP_NUMBER : `whatsapp:${TWILIO_WHATSAPP_NUMBER}`;
+  const to = telefono.startsWith("whatsapp:") ? telefono : `whatsapp:${telefono}`;
+  await axios.post(url,
+    new URLSearchParams({ From: from, To: to, Body: texto }).toString(),
+    {
+      auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" }
+    }
   );
 }
 
 async function enviarDocumento(telefono, pdfBuffer, filename, caption) {
-  const FormData = require("form-data");
-  const form = new FormData();
-  form.append("file", pdfBuffer, { filename, contentType: "application/pdf" });
-  form.append("messaging_product", "whatsapp");
-  const uploadRes = await axios.post("https://waba-sandbox.360dialog.io/v1/media", form,
-    { headers: { "D360-API-KEY": API_KEY, ...form.getHeaders() } });
-  const mediaId = uploadRes.data?.id;
-  if (!mediaId) throw new Error("No se obtuvo media ID");
-  await axios.post(API_URL,
-    { messaging_product: "whatsapp", to: telefono, type: "document",
-      document: { id: mediaId, filename, caption } },
-    { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
-  );
+  // Por ahora enviamos el caption como texto (Twilio requiere URL pública para media)
+  await enviarMensaje(telefono, caption || filename);
 }
 
 function tieneMicrositio(act) {
@@ -113,12 +110,13 @@ function renderActuaciones(actuaciones, radicado, despacho) {
 }
 
 app.post("/webhook", async (req, res) => {
-  res.json({ status: "ok" });
+  res.sendStatus(200);
   try {
-    const mensaje_obj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    if (!mensaje_obj || mensaje_obj.type !== "text") return;
-    const telefono = mensaje_obj.from;
-    const mensaje = mensaje_obj.text.body.trim();
+    // Twilio envía: From=whatsapp:+57..., Body=texto
+    const body = req.body;
+    if (!body || !body.From || !body.Body) return;
+    const telefono = body.From; // ej: "whatsapp:+573001234567"
+    const mensaje = (body.Body || "").trim();
     const sesion = sesiones[telefono] || { paso: "inicio" };
     let respuesta = "";
 
