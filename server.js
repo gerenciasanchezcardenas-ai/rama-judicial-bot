@@ -112,69 +112,67 @@ async function crearLinkPago(referencia, descripcion) {
   }
 }
 
-async function descargarPdfMicrositio(url) {
-  const BASE_MICROSITIO = "https://publicacionesprocesales.ramajudicial.gov.co";
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
-    "Referer": BASE_MICROSITIO + "/"
-  };
+async function capturarScreenshotMicrositio(url) {
+  let browser;
   try {
-    console.log("Descargando página micrositio:", url);
-    const pageRes = await axios.get(url, { timeout: 30000, headers });
-    const html = pageRes.data || "";
-    console.log("HTML micrositio length:", html.length, "status:", pageRes.status);
-
-    // Extraer la URL del PDF probando varios patrones
-    let pdfUrl = null;
-
-    // Patrón 1: document_library/get_file con uuid
-    const m1 = html.match(/["']((?:https?:\/\/[^"']*)?\/c\/document_library\/get_file[^"']*uuid=[^"']+)["']/i);
-    if (m1) pdfUrl = m1[1];
-
-    // Patrón 2: href con .pdf
-    if (!pdfUrl) {
-      const m2 = html.match(/href=["']([^"']*\.pdf[^"']*)["']/i);
-      if (m2) pdfUrl = m2[1];
+    const puppeteer = require("puppeteer-core");
+    // Buscar Chromium disponible en Render (varias rutas posibles)
+    const posiblesChromes = [
+      "/usr/bin/chromium-browser",
+      "/usr/bin/chromium",
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/opt/google/chrome/chrome",
+    ];
+    let executablePath = null;
+    for (const p of posiblesChromes) {
+      if (fs.existsSync(p)) { executablePath = p; break; }
     }
-
-    // Patrón 3: src o data-url con document_library
-    if (!pdfUrl) {
-      const m3 = html.match(/["']((?:https?:\/\/[^"']*)?\/c\/document_library\/[^"']+)["']/i);
-      if (m3) pdfUrl = m3[1];
+    if (!executablePath) {
+      // Intentar instalar chromium con puppeteer si no existe
+      console.log("Chromium no encontrado en rutas estándar, usando puppeteer bundled");
+      executablePath = undefined; // puppeteer-core requiere ruta; si no hay, falla
+      throw new Error("Chromium no disponible en este servidor");
     }
-
-    // Patrón 4: buscar en JS embebido (variables con uuid o fileUrl)
-    if (!pdfUrl) {
-      const m4 = html.match(/uuid['":\s]+['"]([0-9a-f-]{36})['"]/i);
-      if (m4) {
-        const uuid = m4[1];
-        // groupId predeterminado del micrositio
-        pdfUrl = `${BASE_MICROSITIO}/c/document_library/get_file?uuid=${uuid}&groupId=6098902`;
+    console.log("Usando Chromium:", executablePath);
+    browser = await puppeteer.launch({
+      executablePath,
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    console.log("Navegando a:", url);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+    // Esperar que el portlet cargue el contenido
+    await page.waitForTimeout(3000);
+    // Intentar hacer click en "Ver documento" o link PDF si existe
+    try {
+      const pdfLink = await page.$('a[href*="document_library"], a[href*=".pdf"], a[href*="lifecycle=2"]');
+      if (pdfLink) {
+        const href = await page.evaluate(el => el.href, pdfLink);
+        console.log("Link PDF encontrado:", href);
+        // Descargar el PDF directamente
+        const pdfRes = await axios.get(href, {
+          responseType: "arraybuffer",
+          timeout: 45000,
+          headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }
+        });
+        await browser.close();
+        return { tipo: "pdf", data: Buffer.from(pdfRes.data), ext: "pdf" };
       }
+    } catch(linkErr) {
+      console.log("No se encontró link PDF directo:", linkErr.message);
     }
-
-    if (pdfUrl) {
-      if (pdfUrl.startsWith("/")) pdfUrl = BASE_MICROSITIO + pdfUrl;
-      console.log("PDF URL encontrada:", pdfUrl);
-      const pdfRes = await axios.get(pdfUrl, {
-        responseType: "arraybuffer",
-        timeout: 45000,
-        headers: { ...headers, "Accept": "application/pdf,*/*" }
-      });
-      const ct = pdfRes.headers["content-type"] || "";
-      if (ct.includes("pdf") || ct.includes("octet-stream") || pdfUrl.includes("get_file") || pdfUrl.includes(".pdf")) {
-        console.log("PDF descargado, bytes:", pdfRes.data.byteLength);
-        return Buffer.from(pdfRes.data);
-      }
-      console.log("Respuesta no es PDF, content-type:", ct);
-    } else {
-      console.log("No se encontró URL PDF en el HTML. Primeros 500 chars:", html.substring(0, 500));
-    }
-    return null;
+    // Si no hay PDF, tomar screenshot de la página completa
+    const screenshot = await page.screenshot({ type: "jpeg", quality: 85, fullPage: false });
+    await browser.close();
+    console.log("Screenshot tomado, bytes:", screenshot.length);
+    return { tipo: "imagen", data: Buffer.from(screenshot), ext: "jpg" };
   } catch (e) {
-    console.error("Error descargando PDF micrositio:", e.response?.status, e.message);
+    if (browser) try { await browser.close(); } catch(_) {}
+    console.error("Error Puppeteer:", e.message);
     return null;
   }
 }
