@@ -194,10 +194,10 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const idEspecialidad = r.substring(7, 9);         // "03"
     const idDespacho    = r.substring(0, 12);         // "110014003028"
 
-    // Fechas: rango ±7 días alrededor de la fecha de la actuación
-    const fechaStr = fechaActuacion ? fechaActuacion.substring(0, 10) : new Date().toISOString().substring(0, 10);
-    const fInicio = new Date(fechaStr); fInicio.setDate(fInicio.getDate() - 7);
-    const fFin    = new Date(fechaStr); fFin.setDate(fFin.getDate() + 7);
+    // Rango fijo: últimos 60 días hasta hoy
+    // La actuación "Fijación de Estado" siempre es reciente, así que esto cubre todos los casos
+    const fFin    = new Date();
+    const fInicio = new Date(); fInicio.setDate(fInicio.getDate() - 60);
     const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
     console.log(`[micrositio] radicado=${r} despacho=${idDespacho} fecha=${fechaStr} rango=${fmt(fInicio)}→${fmt(fFin)}`);
