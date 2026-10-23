@@ -286,12 +286,19 @@ app.post("/webhook", async (req, res) => {
       } else {
         const act = actuaciones[num - 1];
         sesiones[telefono] = { paso: "inicio" };
-        // MODO PRUEBA: sin cobro — mostrar info de la actuación directamente
         let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
         if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
         if (tieneMicrositio(act)) {
           const docUrl = micrositioUrl(radicado, act.idRegActuacion);
-          msg += `✅ Esta actuación tiene documento en el micrositio.\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}`;
+          await enviarMensaje(telefono, msg + `⏳ Descargando documento del micrositio...`);
+          const pdf = await descargarPdfMicrositio(docUrl);
+          if (pdf) {
+            const filename = `${(radicado || "doc").replace(/\s/g, "_")}_${act.fechaActuacion || "doc"}.pdf`;
+            await enviarDocumento(telefono, pdf, filename, `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`);
+          } else {
+            await enviarMensaje(telefono, `✅ Documento disponible en el micrositio:\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}\n\n📞 +57 313 829 1633`);
+          }
+          return;
         } else {
           msg += `❌ Esta actuación no tiene documento publicado en el micrositio.`;
         }
