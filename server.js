@@ -109,6 +109,29 @@ async function crearLinkPago(referencia, descripcion) {
   }
 }
 
+async function enviarPorCorreo(destinatario, asunto, cuerpo, adjunto) {
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY no configurado");
+  const payload = {
+    from: "Sánchez & Cárdenas <onboarding@resend.dev>",
+    to: [destinatario],
+    subject: asunto,
+    html: cuerpo,
+  };
+  if (adjunto) {
+    payload.attachments = [{
+      filename: adjunto.filename,
+      content: adjunto.buffer.toString("base64"),
+    }];
+  }
+  const res = await axios.post("https://api.resend.com/emails", payload, {
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+    timeout: 30000,
+  });
+  console.log("Resend OK:", res.data?.id);
+  return res.data;
+}
+
 async function capturarScreenshotMicrositio(url) {
   let browser;
   try {
@@ -302,15 +325,25 @@ app.post("/webhook", async (req, res) => {
         if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
         if (tieneMicrositio(act)) {
           const docUrl = micrositioUrl(radicado, act.idRegActuacion);
-          await enviarMensaje(telefono, msg + `⏳ Obteniendo documento del micrositio...`);
-          const resultado = await capturarScreenshotMicrositio(docUrl);
-          if (resultado) {
+          sesiones[telefono] = { paso: "inicio" };
+          await enviarMensaje(telefono, msg + `⏳ Obteniendo el documento y enviando al correo registrado...`);
+          try {
+            const resultado = await capturarScreenshotMicrositio(docUrl);
             const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
-            const filename = `${base}.${resultado.ext}`;
-            const caption = `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`;
-            await enviarArchivo(telefono, resultado.data, filename, caption);
-          } else {
-            await enviarMensaje(telefono, `✅ Documento disponible en el micrositio:\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}\n\n📞 +57 313 829 1633`);
+            const asunto = `Actuación judicial: ${act.actuacion} — ${act.fechaActuacion || ""}`;
+            const cuerpoHtml = `<p><b>Actuación:</b> ${act.actuacion}</p><p><b>Fecha:</b> ${act.fechaActuacion || "N/A"}</p>${act.anotacion ? `<p><b>Anotación:</b> ${act.anotacion}</p>` : ""}<p><b>Radicado:</b> ${radicado}</p>`;
+            const correoDestino = "gerenciasanchezcardenas@gmail.com";
+            if (resultado) {
+              const filename = `${base}.${resultado.ext}`;
+              await enviarPorCorreo(correoDestino, asunto, cuerpoHtml, { filename, buffer: resultado.data });
+              await enviarMensaje(telefono, `✅ Documento enviado a *${correoDestino}*\n\n📞 +57 313 829 1633`);
+            } else {
+              await enviarPorCorreo(correoDestino, asunto, cuerpoHtml + `<p><a href="${docUrl}">Ver documento en el micrositio</a></p>`, null);
+              await enviarMensaje(telefono, `✅ Enlace al documento enviado a *${correoDestino}*\n\n📞 +57 313 829 1633`);
+            }
+          } catch (e) {
+            console.error("Error enviando correo:", e.message);
+            await enviarMensaje(telefono, `✅ Documento disponible en:\n🔗 ${docUrl}\n\n📞 +57 313 829 1633`);
           }
           return;
         } else {
@@ -318,6 +351,40 @@ app.post("/webhook", async (req, res) => {
         }
         msg += `\n\n📞 Más información: +57 313 829 1633`;
         respuesta = msg;
+      }
+
+    } else if (sesion.paso === "esperando_correo_micrositio") {
+      if (mensaje === "0") {
+        sesiones[telefono] = { paso: "inicio" };
+        respuesta = "Cancelado. Escriba cualquier mensaje para iniciar de nuevo.";
+      } else {
+        const correo = mensaje.trim().toLowerCase();
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(correo)) {
+          respuesta = "Por favor escriba un correo válido (ejemplo: nombre@gmail.com), o *0* para cancelar.";
+        } else {
+          const { act, docUrl, radicado } = sesion;
+          sesiones[telefono] = { paso: "inicio" };
+          await enviarMensaje(telefono, `⏳ Obteniendo el documento y enviando a *${correo}*...`);
+          try {
+            const resultado = await capturarScreenshotMicrositio(docUrl);
+            const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
+            const asunto = `Actuación judicial: ${act.actuacion} — ${act.fechaActuacion || ""}`;
+            const cuerpoHtml = `<p><b>Actuación:</b> ${act.actuacion}</p><p><b>Fecha:</b> ${act.fechaActuacion || "N/A"}</p>${act.anotacion ? `<p><b>Anotación:</b> ${act.anotacion}</p>` : ""}<p><b>Radicado:</b> ${radicado}</p>`;
+            if (resultado) {
+              const filename = `${base}.${resultado.ext}`;
+              await enviarPorCorreo(correo, asunto, cuerpoHtml, { filename, buffer: resultado.data });
+              await enviarMensaje(telefono, `✅ Documento enviado a *${correo}*\n\n📞 +57 313 829 1633`);
+            } else {
+              await enviarPorCorreo(correo, asunto, cuerpoHtml + `<p><a href="${docUrl}">Ver documento en el micrositio</a></p>`, null);
+              await enviarMensaje(telefono, `✅ Le enviamos el enlace al documento a *${correo}*\n\n📞 +57 313 829 1633`);
+            }
+          } catch (e) {
+            console.error("Error enviando correo:", e.message);
+            await enviarMensaje(telefono, `⚠️ No fue posible enviar el correo. Intente de nuevo o contáctenos: +57 313 829 1633`);
+          }
+          return;
+        }
       }
 
     } else {
