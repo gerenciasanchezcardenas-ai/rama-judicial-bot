@@ -161,208 +161,166 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
   const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
   const GROUP_ID = "6098902";
   const PORTLET = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
-  // El código del despacho son los primeros 12 dígitos del radicado
-  // Ej: 11001400302820230068200 → despacho = 110014003028
-  // El portal los carga dinámicamente via combo?browserId=...
-  // El formulario usa IDs (no name) y llama buscarPublicaciones via AJAX con los valores de los selects
+  const P = `_${PORTLET}`;
+  // URL real confirmada por captura de Network:
+  // GET /web/publicaciones-procesales/inicio?p_p_id=...&_..._action=busqueda
+  //   &_..._fechaInicio=2026-10-01&_..._fechaFin=2026-10-19
+  //   &_..._idDepto=11&_..._idMuni=11001&_..._idEntidad=40
+  //   &_..._idEspecialidad=03&_..._idDespacho=110014003028
+  //
+  // Estructura del radicado (23 dígitos): DDMMMTTEENNNAAAAA CCCCCC II
+  //   pos 0-1:  idDepto   (11 = Bogotá)
+  //   pos 0-4:  idMuni    (11001 = Bogotá D.C.)
+  //   pos 5-6:  idEntidad (40 = Juzgado Municipal, 03 = Juzgado Circuito, 01 = Tribunal)
+  //   pos 7-8:  idEspecialidad (01=Civil Circuito, 03=Civil Municipal…)
+  //   pos 0-11: idDespacho (12 dígitos: dep+mun+entidad+esp+num)
   const HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "es-CO,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
   };
 
   try {
-    const radicadoLimpio = (radicado || "").replace(/\s/g, "");
-    if (radicadoLimpio.length < 20) { console.error("capturar: radicado inválido:", radicado); return null; }
+    const r = (radicado || "").replace(/\s/g, "");
+    if (r.length < 20) { console.error("[micrositio] radicado inválido:", radicado); return null; }
 
-    // Fecha base para la búsqueda
+    // Extraer componentes del radicado (23 dígitos)
+    // 11  001  40  03  028  2023  00068  200
+    // dep mun  ent esp  num  año  consec inst
+    const idDepto       = r.substring(0, 2);          // "11"
+    const idMuni        = r.substring(0, 5);          // "11001"
+    const idEntidad     = r.substring(5, 7);          // "40"
+    const idEspecialidad = r.substring(7, 9);         // "03"
+    const idDespacho    = r.substring(0, 12);         // "110014003028"
+
+    // Fechas: rango ±7 días alrededor de la fecha de la actuación
     const fechaStr = fechaActuacion ? fechaActuacion.substring(0, 10) : new Date().toISOString().substring(0, 10);
-    // Rango amplio: 5 días antes y 5 días después por seguridad
-    const fInicio = new Date(fechaStr); fInicio.setDate(fInicio.getDate() - 5);
-    const fFin    = new Date(fechaStr); fFin.setDate(fFin.getDate()    + 5);
-    const fmt = d => {
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,"0");
-      const dd = String(d.getDate()).padStart(2,"0");
-      return `${y}-${m}-${dd}`;
-    };
+    const fInicio = new Date(fechaStr); fInicio.setDate(fInicio.getDate() - 7);
+    const fFin    = new Date(fechaStr); fFin.setDate(fFin.getDate() + 7);
+    const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
-    console.log(`[micrositio] radicado=${radicadoLimpio} fechaBase=${fechaStr} rango=${fmt(fInicio)}→${fmt(fFin)}`);
+    console.log(`[micrositio] radicado=${r} despacho=${idDespacho} fecha=${fechaStr} rango=${fmt(fInicio)}→${fmt(fFin)}`);
 
-    // ── PASO 1: obtener sesión (cookies JSESSIONID / GUEST_LANGUAGE_ID etc.) ──
+    // ── PASO 1: GET sesión para obtener cookies ──
     const homeResp = await axios.get(`${BASE}/web/publicaciones-procesales/inicio`, {
-      headers: HEADERS,
-      timeout: 25000,
-      maxRedirects: 5,
-      validateStatus: () => true,
+      headers: HEADERS, timeout: 25000, maxRedirects: 5, validateStatus: () => true,
     });
-    const rawCookies = homeResp.headers["set-cookie"] || [];
-    const cookieStr = rawCookies.map(c => c.split(";")[0]).join("; ");
-    console.log(`[micrositio] cookies sesión: ${cookieStr.substring(0, 100)}`);
+    const cookieStr = (homeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
+    console.log(`[micrositio] cookies: ${cookieStr.substring(0, 80)}`);
 
-    // ── PASO 2: buscar por número de radicado usando el endpoint de recursos Liferay ──
-    // El portlet expone un recurso AJAX (lifecycle=2) para búsqueda
-    // Probamos primero con serveResource (lifecycle=2) que devuelve JSON/HTML con los resultados
-    const searchHeaders = {
-      ...HEADERS,
-      "Cookie": cookieStr,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Referer": `${BASE}/web/publicaciones-procesales/inicio`,
-      "X-Requested-With": "XMLHttpRequest",
-    };
+    // ── PASO 2: GET búsqueda con los filtros correctos (URL confirmada por Network capture) ──
+    // action=busqueda con idDepto, idMuni, idEntidad, idEspecialidad, idDespacho, fechaInicio, fechaFin
+    const params = new URLSearchParams({
+      "p_p_id": PORTLET,
+      "p_p_lifecycle": "0",
+      "p_p_state": "normal",
+      "p_p_mode": "view",
+      [`${P}_action`]: "busqueda",
+      [`${P}_fechaInicio`]: fmt(fInicio),
+      [`${P}_fechaFin`]: fmt(fFin),
+      [`${P}_idDepto`]: idDepto,
+      [`${P}_idMuni`]: idMuni,
+      [`${P}_idEntidad`]: idEntidad,
+      [`${P}_idEspecialidad`]: idEspecialidad,
+      [`${P}_idDespacho`]: idDespacho,
+      [`${P}_verTotales`]: "false",
+    });
 
-    // Construir form data exactamente como lo hace el navegador al hacer click en "Buscar"
-    const form = new URLSearchParams();
-    form.append("p_p_id", PORTLET);
-    form.append("p_p_lifecycle", "2");
-    form.append("p_p_state", "normal");
-    form.append("p_p_mode", "view");
-    form.append("p_p_resource_id", "buscarPublicaciones");
-    form.append("p_p_cacheability", "cacheLevelPage");
-    form.append(`_${PORTLET}_radicado`, radicadoLimpio);
-    form.append(`_${PORTLET}_fechaInicio`, fmt(fInicio));
-    form.append(`_${PORTLET}_fechaFin`, fmt(fFin));
+    const busqUrl = `${BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
+    console.log(`[micrositio] GET búsqueda: ${busqUrl.substring(0, 200)}`);
 
-    console.log(`[micrositio] POST serveResource búsqueda radicado...`);
-    let htmlResultados = "";
-    let articleId = null;
+    const busqResp = await axios.get(busqUrl, {
+      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
+      timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+    });
+    const htmlBusq = busqResp.data || "";
+    console.log(`[micrositio] búsqueda status=${busqResp.status} bytes=${htmlBusq.length}`);
 
-    try {
-      const searchResp = await axios.post(`${BASE}/web/publicaciones-procesales/inicio`, form.toString(), {
-        headers: searchHeaders,
-        timeout: 30000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-      });
-      console.log(`[micrositio] respuesta búsqueda status=${searchResp.status} bytes=${(searchResp.data||"").length}`);
-      htmlResultados = searchResp.data || "";
-    } catch(e2) {
-      console.log(`[micrositio] serveResource falló: ${e2.message}`);
+    // ── PASO 3: en los resultados, buscar el link del estado que corresponde al radicado ──
+    // El HTML tiene cards de publicaciones con links "VER DETALLE" que contienen articleId
+    // También puede tener el número de radicado visible en el texto
+    // Extraer todos los articleId presentes
+    const reArt = /articleId[=\s:"']+(\d{6,12})/gi;
+    let ma;
+    const articleIds = [];
+    while ((ma = reArt.exec(htmlBusq)) !== null) {
+      if (!articleIds.includes(ma[1])) articleIds.push(ma[1]);
     }
+    console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
-    // ── PASO 2B: si lifecycle=2 no trajo resultados, intentar con lifecycle=1 (action) ──
-    if (!htmlResultados || htmlResultados.length < 200) {
-      console.log(`[micrositio] intentando lifecycle=1 action...`);
-      const form2 = new URLSearchParams();
-      form2.append("p_p_id", PORTLET);
-      form2.append("p_p_lifecycle", "1");
-      form2.append("p_p_state", "normal");
-      form2.append("p_p_mode", "view");
-      form2.append(`_${PORTLET}_javax.portlet.action`, "buscarPublicaciones");
-      form2.append(`_${PORTLET}_radicado`, radicadoLimpio);
-      form2.append(`_${PORTLET}_fechaInicio`, fmt(fInicio));
-      form2.append(`_${PORTLET}_fechaFin`, fmt(fFin));
-
-      const searchResp2 = await axios.post(`${BASE}/web/publicaciones-procesales/inicio`, form2.toString(), {
-        headers: { ...HEADERS, "Cookie": cookieStr, "Content-Type": "application/x-www-form-urlencoded", "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
-        timeout: 30000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-      });
-      console.log(`[micrositio] action status=${searchResp2.status} bytes=${(searchResp2.data||"").length}`);
-      htmlResultados = searchResp2.data || "";
-    }
-
-    // ── PASO 3: extraer articleId de los resultados HTML ──
-    if (htmlResultados) {
-      const reArt = /articleId[=\s:"']+(\d{6,12})/gi;
-      let ma;
-      const ids = [];
-      while ((ma = reArt.exec(htmlResultados)) !== null) {
-        if (!ids.includes(ma[1])) ids.push(ma[1]);
-      }
-      console.log(`[micrositio] articleIds encontrados:`, ids);
-      if (ids.length > 0) articleId = ids[0];
-    }
-
-    // ── PASO 3B: si no encontramos articleId en la búsqueda, intentar con la API REST de Liferay ──
-    if (!articleId) {
-      console.log(`[micrositio] buscando via API REST Liferay journal-article...`);
-      try {
-        // Liferay expone /api/jsonws para queries
-        const apiUrl = `${BASE}/api/jsonws/journalarticle/search/company-id/20099/group-id/${GROUP_ID}/keywords/${encodeURIComponent(radicadoLimpio)}/statuses/0/start/0/end/5/obc`;
-        const apiResp = await axios.get(apiUrl, {
-          headers: { ...HEADERS, "Cookie": cookieStr },
-          timeout: 20000,
-          validateStatus: () => true,
-        });
-        if (apiResp.data && Array.isArray(apiResp.data) && apiResp.data.length > 0) {
-          articleId = String(apiResp.data[0].id || apiResp.data[0].resourcePrimKey || "");
-          console.log(`[micrositio] articleId via API REST:`, articleId);
-        }
-      } catch(e3) {
-        console.log(`[micrositio] API REST falló: ${e3.message}`);
-      }
-    }
-
-    if (!articleId) {
-      console.log(`[micrositio] No se encontró articleId. HTML primeros 500 chars:`, htmlResultados.substring(0, 500));
+    if (articleIds.length === 0) {
+      // Si no hay resultados directos, buscar la categoría "Notificaciones por Estados" y filtrar
+      // El portal muestra categorías — si hay Fijaciones o Notificaciones por Estados, buscar dentro
+      const tieneResultados = htmlBusq.includes("articleId") || htmlBusq.includes("VER DETALLE") || htmlBusq.includes("ver-detalle");
+      console.log(`[micrositio] tieneResultados=${tieneResultados}. HTML[0-600]: ${htmlBusq.substring(0, 600)}`);
       return null;
     }
 
-    // ── PASO 4: GET página de detalle del artículo ──
-    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&_${PORTLET}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&_${PORTLET}_articleId=${articleId}`;
-    console.log(`[micrositio] GET detalle articleId=${articleId}`);
+    // Usar el primer articleId encontrado
+    // Si hay varios, intentar encontrar el que corresponde al radicado buscando en el contexto
+    let articleId = articleIds[0];
+    const radicadoCorto = r.substring(16, 21); // últimos 5 dígitos del consecutivo
+    for (const aid of articleIds) {
+      // Buscar el contexto alrededor de este articleId en el HTML
+      const idx = htmlBusq.indexOf(`articleId=${aid}`);
+      if (idx > -1) {
+        const contexto = htmlBusq.substring(Math.max(0, idx - 300), idx + 300);
+        if (contexto.includes(radicadoCorto) || contexto.includes(r.substring(12, 16))) {
+          articleId = aid;
+          console.log(`[micrositio] articleId=${aid} coincide con radicado`);
+          break;
+        }
+      }
+    }
+    console.log(`[micrositio] usando articleId=${articleId}`);
+
+    // ── PASO 4: GET detalle del artículo ──
+    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${articleId}`;
+    console.log(`[micrositio] GET detalle: ${detalleUrl.substring(0, 200)}`);
     const detalleResp = await axios.get(detalleUrl, {
-      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
-      timeout: 25000,
-      maxRedirects: 5,
-      validateStatus: () => true,
+      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
+      timeout: 25000, maxRedirects: 5, validateStatus: () => true,
     });
     const htmlDetalle = detalleResp.data || "";
-    console.log(`[micrositio] detalle bytes=${htmlDetalle.length}`);
+    console.log(`[micrositio] detalle status=${detalleResp.status} bytes=${htmlDetalle.length}`);
 
-    // ── PASO 5: extraer uuid del documento PDF ──
-    // Patrones posibles en el HTML:
-    // uuid=c527b47b-79a8-87ba-0fd7-7ca3cdb02f42&groupId=6098902
-    // /c/document_library/get_file?uuid=XXXX
-    let uuid = null;
-    let groupId = GROUP_ID;
-
-    const patterns = [
+    // ── PASO 5: extraer uuid del PDF ──
+    let uuid = null, groupId = GROUP_ID;
+    const uuidPatterns = [
       /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})&groupId=(\d+)/i,
-      /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
       /get_file\?uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-      /"uuid"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i,
+      /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
     ];
-
-    for (const pat of patterns) {
+    for (const pat of uuidPatterns) {
       const mu = pat.exec(htmlDetalle);
-      if (mu) {
-        uuid = mu[1];
-        if (mu[2]) groupId = mu[2];
-        break;
-      }
+      if (mu) { uuid = mu[1]; if (mu[2]) groupId = mu[2]; break; }
     }
 
     if (!uuid) {
-      console.log(`[micrositio] uuid no encontrado. Detalle primeros 800:`, htmlDetalle.substring(0, 800));
+      console.log(`[micrositio] uuid no encontrado. Detalle[0-600]: ${htmlDetalle.substring(0, 600)}`);
       return null;
     }
 
     const pdfUrl = `${BASE}/c/document_library/get_file?uuid=${uuid}&groupId=${groupId}`;
     console.log(`[micrositio] PDF URL: ${pdfUrl}`);
 
-    // ── PASO 6: descargar el PDF ──
+    // ── PASO 6: descargar PDF ──
     const pdfResp = await axios.get(pdfUrl, {
       headers: { ...HEADERS, "Cookie": cookieStr },
-      responseType: "arraybuffer",
-      timeout: 40000,
-      validateStatus: () => true,
+      responseType: "arraybuffer", timeout: 40000, validateStatus: () => true,
     });
 
     if (pdfResp.status !== 200) {
-      console.log(`[micrositio] descarga PDF falló status=${pdfResp.status}`);
+      console.log(`[micrositio] descarga PDF status=${pdfResp.status}`);
       return null;
     }
 
     const pdfBuffer = Buffer.from(pdfResp.data);
-    console.log(`[micrositio] PDF descargado OK bytes=${pdfBuffer.length}`);
+    console.log(`[micrositio] PDF OK bytes=${pdfBuffer.length}`);
 
-    if (pdfBuffer.length < 1000) {
-      console.log(`[micrositio] PDF muy pequeño, probablemente error:`, pdfBuffer.toString("utf8", 0, 200));
+    if (pdfBuffer.length < 500) {
+      console.log(`[micrositio] respuesta muy pequeña: ${pdfBuffer.toString("utf8", 0, 200)}`);
       return null;
     }
 
