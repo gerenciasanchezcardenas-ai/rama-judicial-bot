@@ -101,8 +101,17 @@ function parsearRadicado(radicado) {
 }
 
 function micrositioUrl(radicado, idRegActuacion) {
-  // Devuelve la URL raíz del micrositio para usar en emails como referencia
-  return `https://publicacionesprocesales.ramajudicial.gov.co/`;
+  // URL de búsqueda pre-rellenada con el radicado — lleva directamente a los resultados del proceso
+  const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
+  const PORTLET = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
+  const r = (radicado || "").replace(/\s/g, "");
+  // Rango de fechas amplio: 30 días antes y 30 días después de hoy
+  const hoy = new Date();
+  const fIni = new Date(hoy); fIni.setDate(hoy.getDate() - 30);
+  const fFin = new Date(hoy); fFin.setDate(hoy.getDate() + 5);
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  // URL con parámetros de búsqueda en el portlet (lifecycle=0 render con filtros pre-cargados)
+  return `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&_${PORTLET}_radicado=${r}&_${PORTLET}_fechaInicio=${fmt(fIni)}&_${PORTLET}_fechaFin=${fmt(fFin)}`;
 }
 
 async function crearLinkPago(referencia, descripcion) {
@@ -821,6 +830,28 @@ app.get("/pdf/:filename", (req, res) => {
 app.get("/health", (req, res) =>
   res.json({ estado: "OK", servicio: "Sánchez & Cárdenas – Bot Rama Judicial", hora: new Date().toISOString() })
 );
+
+// Diagnóstico: prueba completa capturarScreenshotMicrositio con un radicado real
+// GET /test-micrositio/11001400302820230068200
+app.get("/test-micrositio/:radicado", async (req, res) => {
+  const radicado = req.params.radicado;
+  const fecha = req.query.fecha || new Date().toISOString().substring(0, 10);
+  console.log(`[test-micrositio] radicado=${radicado} fecha=${fecha}`);
+  try {
+    const resultado = await capturarScreenshotMicrositio(radicado, null, fecha);
+    if (resultado) {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${radicado}.pdf"`);
+      res.send(resultado.data);
+    } else {
+      // Devolver también la URL de búsqueda útil
+      const urlBusqueda = micrositioUrl(radicado, null);
+      res.json({ ok: false, mensaje: "No se encontró PDF. Revise logs de Render.", urlBusqueda });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Endpoint de diagnóstico: ver qué devuelve el micrositio para un idRegActuacion
 app.get("/debug-micrositio/:idReg", async (req, res) => {
