@@ -313,20 +313,29 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     let htmlDetalle = "";
     articleId = null;
 
-    for (const aid of articleIds) {
+    // Pedir todos los detalles EN PARALELO para no acumular timeouts
+    const idsARevisar = articleIds.slice(0, 5);
+    console.log(`[micrositio] GET detalles en paralelo: ${idsARevisar.join(", ")}`);
+    const detalles = await Promise.all(idsARevisar.map(async (aid) => {
       const dUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${aid}`;
-      console.log(`[micrositio] GET detalle articleId=${aid}`);
-      const dResp = await axios.get(dUrl, {
-        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
-        timeout: 25000, maxRedirects: 5, validateStatus: () => true,
-      });
-      const htmlD = dResp.data || "";
-      console.log(`[micrositio] detalle ${aid} status=${dResp.status} bytes=${htmlD.length}`);
-      // Log del radicado visible en el detalle para diagnóstico
-      const idxRad = htmlD.search(/\d{23}/);
-      if (idxRad > -1) console.log(`[micrositio] radicado en detalle ${aid}: ${htmlD.substring(idxRad, idxRad+23)}`);
+      try {
+        const dResp = await axios.get(dUrl, {
+          headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
+          timeout: 20000, maxRedirects: 5, validateStatus: () => true,
+        });
+        const htmlD = dResp.data || "";
+        // Log del número de proceso visible en el detalle
+        const idxRad = htmlD.search(/\d{8,23}/);
+        if (idxRad > -1) console.log(`[micrositio] detalle ${aid}: "${htmlD.substring(idxRad, idxRad+23).trim()}"`);
+        return { aid, htmlD };
+      } catch(e) {
+        console.log(`[micrositio] detalle ${aid} error: ${e.message}`);
+        return { aid, htmlD: "" };
+      }
+    }));
 
-      // Verificar si este detalle contiene el radicado
+    // Buscar el que coincide con el radicado
+    for (const { aid, htmlD } of detalles) {
       const coincide = tokensRad.some(t => t && htmlD.includes(t));
       if (coincide) {
         articleId = aid;
@@ -334,12 +343,12 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
         console.log(`[micrositio] articleId=${aid} COINCIDE con radicado`);
         break;
       } else {
-        console.log(`[micrositio] articleId=${aid} no coincide, siguiente...`);
+        console.log(`[micrositio] articleId=${aid} no coincide (tokens: ${tokensRad.join("|")})`);
       }
     }
 
     if (!articleId) {
-      console.log(`[micrositio] Ningún articleId coincidió con el radicado. Tokens buscados: ${tokensRad.join(", ")}`);
+      console.log(`[micrositio] Ningún articleId coincidió. Tokens: ${tokensRad.join(", ")}`);
       return null;
     }
 
