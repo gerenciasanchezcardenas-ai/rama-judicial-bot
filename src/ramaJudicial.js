@@ -71,7 +71,7 @@ async function obtenerActuaciones(idProceso, cantidad = 7) {
     try {
       const url = `${BASE_URL}/Proceso/Actuaciones/${idProceso}`;
       const params = { pagina: 1 };
-      const response = await axios.get(url, { params, headers: HEADERS, timeout: 25000 });
+      const response = await axios.get(url, { params, headers: HEADERS, timeout: 45000 });
       const data = response.data;
       if (data && data.actuaciones && data.actuaciones.length > 0) {
         console.log(`obtenerActuaciones OK en intento ${i}, idProceso=${idProceso}`);
