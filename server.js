@@ -598,6 +598,31 @@ app.post("/wompi-webhook", async (req, res) => {
   }
 });
 
+// Endpoint para disparar el sync diario (protegido con SYNC_SECRET)
+app.post("/run-sync", async (req, res) => {
+  const secret = process.env.SYNC_SECRET || "sc-sync-2024";
+  const provided = req.headers["x-sync-secret"] || req.query.secret;
+  if (provided !== secret) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  res.json({ status: "iniciando sync" });
+  // Correr en background sin bloquear la respuesta
+  try {
+    const { execSync } = require("child_process");
+    const { exec } = require("child_process");
+    exec("node sync-rama-judicial.js", { cwd: __dirname, timeout: 10 * 60 * 1000 },
+      (err, stdout, stderr) => {
+        if (err) console.error("[run-sync] Error:", err.message);
+        if (stdout) console.log("[run-sync] stdout:", stdout.substring(0, 500));
+        if (stderr) console.error("[run-sync] stderr:", stderr.substring(0, 300));
+        console.log("[run-sync] Finalizado");
+      }
+    );
+  } catch(e) {
+    console.error("[run-sync] Error lanzando proceso:", e.message);
+  }
+});
+
 app.get("/pdf/:filename", (req, res) => {
   const filename = req.params.filename;
   const filepath = path.join(__dirname, "tmp_pdfs", filename);
