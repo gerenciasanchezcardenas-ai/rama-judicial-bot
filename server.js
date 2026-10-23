@@ -299,23 +299,38 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       }
     }
 
-    // Fallback: usar el primero (puede ser incorrecto si hay varios procesos del mismo juzgado)
-    if (!articleId) {
-      articleId = articleIds[0];
-      console.log(`[micrositio] FALLBACK usando primer articleId=${articleId} (puede no corresponder al radicado)`);
-    } else {
-      console.log(`[micrositio] usando articleId=${articleId}`);
+    // ── PASO 4: recorrer cada articleId buscando el que contiene el radicado en su detalle ──
+    // El HTML de búsqueda NO incluye el radicado — hay que entrar al detalle de cada uno
+    const tokensRad = [r, anioRad + consecRad, consecRad];
+    let htmlDetalle = "";
+    articleId = null;
+
+    for (const aid of articleIds) {
+      const dUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${aid}`;
+      console.log(`[micrositio] GET detalle articleId=${aid}`);
+      const dResp = await axios.get(dUrl, {
+        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
+        timeout: 25000, maxRedirects: 5, validateStatus: () => true,
+      });
+      const htmlD = dResp.data || "";
+      console.log(`[micrositio] detalle ${aid} status=${dResp.status} bytes=${htmlD.length}`);
+
+      // Verificar si este detalle contiene el radicado
+      const coincide = tokensRad.some(t => t && htmlD.includes(t));
+      if (coincide) {
+        articleId = aid;
+        htmlDetalle = htmlD;
+        console.log(`[micrositio] articleId=${aid} COINCIDE con radicado`);
+        break;
+      } else {
+        console.log(`[micrositio] articleId=${aid} no coincide, siguiente...`);
+      }
     }
 
-    // ── PASO 4: GET detalle del artículo ──
-    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${articleId}`;
-    console.log(`[micrositio] GET detalle: ${detalleUrl.substring(0, 200)}`);
-    const detalleResp = await axios.get(detalleUrl, {
-      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
-      timeout: 25000, maxRedirects: 5, validateStatus: () => true,
-    });
-    const htmlDetalle = detalleResp.data || "";
-    console.log(`[micrositio] detalle status=${detalleResp.status} bytes=${htmlDetalle.length}`);
+    if (!articleId) {
+      console.log(`[micrositio] Ningún articleId coincidió con el radicado. Tokens buscados: ${tokensRad.join(", ")}`);
+      return null;
+    }
 
     // ── PASO 5: extraer uuid del PDF ──
     let uuid = null, groupId = GROUP_ID;
