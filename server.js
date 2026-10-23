@@ -81,16 +81,33 @@ function tieneMicrositio(act) {
   );
 }
 
-function micrositioUrl(radicado, idRegActuacion) {
+function parsearRadicado(radicado) {
+  // 23 dígitos: DD MMM TT EE NNN AAAA CCCCC II
+  // pos 0-1: departamento (DANE)
+  // pos 2-4: municipio
+  // pos 5-6: tipo entidad
+  // pos 7-8: especialidad
+  // pos 9-11: número despacho (3 dígitos)
+  // pos 12-15: año
+  // pos 16-20: consecutivo
+  // pos 21-22: instancia
   const r = (radicado || "").replace(/\s/g, "");
-  if (r.length >= 21) {
-    const year = r.substring(12, 16);
-    const num = r.substring(16, 21);
-    const articleId = `${year}-${num}`;
-    const portletId = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
-    return `https://publicacionesprocesales.ramajudicial.gov.co/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${portletId}&p_p_lifecycle=0&_${portletId}_articleId=${articleId}&_${portletId}_idRegActuacion=${idRegActuacion}`;
-  }
-  return null;
+  if (r.length < 21) return null;
+  const dep    = r.substring(0, 2);
+  const mun    = r.substring(2, 5);
+  const tipo   = r.substring(5, 7);
+  const esp    = r.substring(7, 9);
+  const num    = r.substring(9, 12);
+  const year   = r.substring(12, 16);
+  const consec = r.substring(16, 21);
+  // El value del Despacho en el micrositio = dep + mun + tipo + esp + num (12 chars)
+  const despachoCod = dep + mun + tipo + esp + num;
+  return { dep, mun, tipo, esp, num, year, consec, despachoCod };
+}
+
+function micrositioUrl(radicado, idRegActuacion) {
+  // Devuelve la URL raíz del micrositio para usar en emails como referencia
+  return `https://publicacionesprocesales.ramajudicial.gov.co/`;
 }
 
 async function crearLinkPago(referencia, descripcion) {
@@ -132,11 +149,21 @@ async function enviarPorCorreo(destinatario, asunto, cuerpo, adjunto) {
   return res.data;
 }
 
-async function capturarScreenshotMicrositio(url) {
+// Navega el micrositio aplicando los filtros en cascada derivados del radicado
+// y descarga el documento de la actuación con el idRegActuacion dado.
+// Retorna { tipo, data, ext } o null si falla.
+async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActuacion) {
   let browser;
   try {
     const puppeteer = require("puppeteer");
-    console.log("Lanzando Chromium bundled con puppeteer...");
+    const parsed = parsearRadicado(radicado);
+    if (!parsed) {
+      console.error("capturarScreenshotMicrositio: radicado inválido:", radicado);
+      return null;
+    }
+    const { dep, despachoCod, year, consec } = parsed;
+    console.log("Micrositio - radicado:", radicado, "| despachoCod:", despachoCod, "| idRegActuacion:", idRegActuacion);
+
     browser = await puppeteer.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
@@ -144,36 +171,154 @@ async function capturarScreenshotMicrositio(url) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-    console.log("Navegando a:", url);
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
-    // Esperar que el portlet cargue el contenido
+
+    // 1. Navegar al micrositio
+    console.log("Navegando al micrositio raíz...");
+    await page.goto("https://publicacionesprocesales.ramajudicial.gov.co/", {
+      waitUntil: "networkidle2", timeout: 60000
+    });
     await page.waitForTimeout(3000);
-    // Intentar hacer click en "Ver documento" o link PDF si existe
-    try {
-      const pdfLink = await page.$('a[href*="document_library"], a[href*=".pdf"], a[href*="lifecycle=2"]');
-      if (pdfLink) {
-        const href = await page.evaluate(el => el.href, pdfLink);
-        console.log("Link PDF encontrado:", href);
-        // Descargar el PDF directamente
-        const pdfRes = await axios.get(href, {
-          responseType: "arraybuffer",
-          timeout: 45000,
-          headers: { "User-Agent": "Mozilla/5.0", "Accept": "*/*" }
-        });
-        await browser.close();
-        return { tipo: "pdf", data: Buffer.from(pdfRes.data), ext: "pdf" };
-      }
-    } catch(linkErr) {
-      console.log("No se encontró link PDF directo:", linkErr.message);
+
+    // 2. Seleccionar Departamento
+    // El select de departamento es el primero que tiene options con value de 2 chars (códigos DANE)
+    console.log("Seleccionando Departamento:", dep);
+    const allSelectsForDep = await page.$$('select');
+    let depSelect = null;
+    for (const sel of allSelectsForDep) {
+      const opts = await sel.$$(`option[value="${dep}"]`);
+      if (opts.length > 0) { depSelect = sel; break; }
     }
-    // Si no hay PDF, tomar screenshot de la página completa
-    const screenshot = await page.screenshot({ type: "jpeg", quality: 85, fullPage: false });
+    if (depSelect) {
+      await depSelect.select(dep);
+      console.log("Departamento seleccionado:", dep);
+      await page.waitForTimeout(2000);
+    } else {
+      console.warn("No se encontró el select de departamento con value:", dep);
+    }
+
+    // 3. Seleccionar Despacho directamente (el value es el código de 12 dígitos)
+    // Buscar el select que tenga un option con value = despachoCod (con o sin espacio al inicio)
+    console.log("Buscando select Despacho con code:", despachoCod);
+    const allSelects = await page.$$('select');
+    let despachoSelect = null;
+    for (const sel of allSelects) {
+      // Buscar option cuyo value contiene despachoCod (puede tener espacio al inicio)
+      const found = await sel.evaluate((el, cod) => {
+        const opts = Array.from(el.options);
+        return opts.some(o => o.value.trim() === cod);
+      }, despachoCod);
+      if (found) { despachoSelect = sel; break; }
+    }
+    if (despachoSelect) {
+      // Seleccionar el option cuyo value.trim() === despachoCod
+      await despachoSelect.evaluate((el, cod) => {
+        const opt = Array.from(el.options).find(o => o.value.trim() === cod);
+        if (opt) { el.value = opt.value; el.dispatchEvent(new Event('change', { bubbles: true })); }
+      }, despachoCod);
+      console.log("Despacho seleccionado:", despachoCod);
+      await page.waitForTimeout(2000);
+    } else {
+      console.warn("Despacho no encontrado en dropdown, intentando filtrar solo por departamento");
+    }
+
+    // 4. Ajustar fechas: buscar 6 meses atrás como Fecha Inicio
+    if (fechaActuacion) {
+      try {
+        const fActuacion = new Date(fechaActuacion);
+        const fInicio = new Date(fActuacion);
+        fInicio.setMonth(fInicio.getMonth() - 2);
+        const fFin = new Date(fActuacion);
+        fFin.setMonth(fFin.getMonth() + 1);
+        const fmt = d => d.toISOString().substring(0, 10); // YYYY-MM-DD
+        // Buscar inputs de fecha
+        const dateInputs = await page.$$('input[type="date"], input[name*="fecha"], input[placeholder*="fecha"]');
+        if (dateInputs.length >= 1) {
+          await dateInputs[0].evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); }, fmt(fInicio));
+          console.log("Fecha inicio:", fmt(fInicio));
+        }
+        if (dateInputs.length >= 2) {
+          await dateInputs[1].evaluate((el, v) => { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); }, fmt(fFin));
+          console.log("Fecha fin:", fmt(fFin));
+        }
+      } catch(dateErr) { console.warn("Error ajustando fechas:", dateErr.message); }
+    }
+
+    // 5. Hacer clic en BUSCAR
+    console.log("Buscando botón BUSCAR...");
+    const buscarBtn = await page.$('button[type="submit"], button:not([type]), input[type="submit"]');
+    if (buscarBtn) {
+      await buscarBtn.click();
+      console.log("Botón BUSCAR clickeado");
+    } else {
+      // Intentar por texto
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+        const b = btns.find(el => /buscar/i.test(el.textContent || el.value));
+        if (b) b.click();
+      });
+      console.log("BUSCAR clickeado por texto");
+    }
+    await page.waitForTimeout(5000);
+
+    // 6. Buscar el documento con idRegActuacion en los resultados
+    // El micrositio muestra tarjetas/filas; buscar link que contenga el idRegActuacion
+    console.log("Buscando documento idRegActuacion:", idRegActuacion);
+    let pdfUrl = null;
+
+    // Intentar encontrar link directo al documento
+    pdfUrl = await page.evaluate((idReg) => {
+      // Buscar en todos los links href que contenga el idReg
+      const links = Array.from(document.querySelectorAll('a[href]'));
+      const found = links.find(a => a.href && a.href.includes(String(idReg)));
+      return found ? found.href : null;
+    }, String(idRegActuacion));
+
+    if (!pdfUrl) {
+      // Buscar botón/link de "Ver" o "Descargar" cerca de cualquier referencia al consecutivo
+      pdfUrl = await page.evaluate((consec, year) => {
+        const text = `${year}-${consec}`;
+        const allEls = Array.from(document.querySelectorAll('*'));
+        for (const el of allEls) {
+          if (el.textContent && el.textContent.includes(text)) {
+            // Buscar el link más cercano
+            const link = el.closest('tr, .card, .item, li')?.querySelector('a[href]');
+            if (link) return link.href;
+          }
+        }
+        return null;
+      }, consec, year);
+    }
+
+    if (pdfUrl) {
+      console.log("URL documento encontrada:", pdfUrl);
+      // Descargar directamente con axios
+      const cookies = await page.cookies();
+      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      const pdfRes = await axios.get(pdfUrl, {
+        responseType: "arraybuffer",
+        timeout: 45000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Cookie": cookieStr,
+          "Accept": "application/pdf,*/*"
+        }
+      });
+      await browser.close();
+      const contentType = pdfRes.headers["content-type"] || "";
+      const ext = contentType.includes("pdf") ? "pdf" : "bin";
+      return { tipo: "pdf", data: Buffer.from(pdfRes.data), ext };
+    }
+
+    // Si no se encontró link, tomar screenshot de los resultados
+    console.log("No se encontró link PDF, tomando screenshot de resultados...");
+    const screenshot = await page.screenshot({ type: "jpeg", quality: 85, fullPage: true });
     await browser.close();
     console.log("Screenshot tomado, bytes:", screenshot.length);
     return { tipo: "imagen", data: Buffer.from(screenshot), ext: "jpg" };
+
   } catch (e) {
     if (browser) try { await browser.close(); } catch(_) {}
-    console.error("Error Puppeteer:", e.message);
+    console.error("Error capturarScreenshotMicrositio:", e.message);
     return null;
   }
 }
@@ -349,16 +494,17 @@ app.post("/webhook", async (req, res) => {
           sesiones[telefono] = { paso: "inicio" };
           await enviarMensaje(telefono, `⏳ Obteniendo el documento y enviando a *${correo}*...`);
           try {
-            const resultado = await capturarScreenshotMicrositio(docUrl);
+            const resultado = await capturarScreenshotMicrositio(radicado, act.idRegActuacion, act.fechaActuacion);
             const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
             const asunto = `Actuación judicial: ${act.actuacion} — ${act.fechaActuacion || ""}`;
+            const micrositioLink = `https://publicacionesprocesales.ramajudicial.gov.co/`;
             const cuerpoHtml = `<p><b>Actuación:</b> ${act.actuacion}</p><p><b>Fecha:</b> ${act.fechaActuacion || "N/A"}</p>${act.anotacion ? `<p><b>Anotación:</b> ${act.anotacion}</p>` : ""}<p><b>Radicado:</b> ${radicado}</p>`;
             if (resultado) {
               const filename = `${base}.${resultado.ext}`;
               await enviarPorCorreo(correo, asunto, cuerpoHtml, { filename, buffer: resultado.data });
               await enviarMensaje(telefono, `✅ Documento enviado a *${correo}*\n\n📞 +57 313 829 1633`);
             } else {
-              await enviarPorCorreo(correo, asunto, cuerpoHtml + `<p><a href="${docUrl}">Ver documento en el micrositio</a></p>`, null);
+              await enviarPorCorreo(correo, asunto, cuerpoHtml + `<p>Consulte el documento en: <a href="${micrositioLink}">${micrositioLink}</a></p>`, null);
               await enviarMensaje(telefono, `✅ Le enviamos el enlace al documento a *${correo}*\n\n📞 +57 313 829 1633`);
             }
           } catch (e) {
@@ -402,8 +548,8 @@ app.post("/wompi-webhook", async (req, res) => {
     delete pendingPayments[reference];
     await enviarMensaje(telefono, `✅ *¡Pago confirmado!* Gracias.\n\n⏳ Descargando el documento del micrositio...`);
     let enviado = false;
-    if (docUrl) {
-      const resultado = await capturarScreenshotMicrositio(docUrl);
+    if (radicado && act) {
+      const resultado = await capturarScreenshotMicrositio(radicado, act.idRegActuacion, act.fechaActuacion);
       if (resultado) {
         const base = (radicado || "doc").replace(/\s/g, "_") + "_" + (act.fechaActuacion || "doc");
         const filename = `${base}.${resultado.ext}`;
