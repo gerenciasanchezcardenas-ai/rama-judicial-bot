@@ -112,30 +112,11 @@ async function crearLinkPago(referencia, descripcion) {
 async function capturarScreenshotMicrositio(url) {
   let browser;
   try {
-    const puppeteer = require("puppeteer-core");
-    // Buscar Chromium disponible en Render (varias rutas posibles)
-    const posiblesChromes = [
-      "/usr/bin/chromium-browser",
-      "/usr/bin/chromium",
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/opt/google/chrome/chrome",
-    ];
-    let executablePath = null;
-    for (const p of posiblesChromes) {
-      if (fs.existsSync(p)) { executablePath = p; break; }
-    }
-    if (!executablePath) {
-      // Intentar instalar chromium con puppeteer si no existe
-      console.log("Chromium no encontrado en rutas estándar, usando puppeteer bundled");
-      executablePath = undefined; // puppeteer-core requiere ruta; si no hay, falla
-      throw new Error("Chromium no disponible en este servidor");
-    }
-    console.log("Usando Chromium:", executablePath);
+    const puppeteer = require("puppeteer");
+    console.log("Lanzando Chromium bundled con puppeteer...");
     browser = await puppeteer.launch({
-      executablePath,
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
     });
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
