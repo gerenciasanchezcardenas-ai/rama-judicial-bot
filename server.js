@@ -301,9 +301,15 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
 
     // ── PASO 4: recorrer cada articleId buscando el que contiene el radicado en su detalle ──
     // El HTML de búsqueda NO incluye el radicado — hay que entrar al detalle de cada uno
-    // Tokens en orden de especificidad — el radicado completo primero, luego año+consecutivo
-    // NO usar solo el consecutivo (00682) porque puede coincidir con otros años del mismo juzgado
-    const tokensRad = [r, anioRad + consecRad, anioRad + "0" + consecRad];
+    // El portal muestra el proceso como "AAAA00NNN" — año + consecutivo (pos 16-20)
+    // Ejemplo: radicado 11001400302820230068200 → "202300682" en el detalle
+    const consecSinCeros = String(parseInt(consecRad, 10)); // "00682" → "682"
+    const tokensRad = [
+      r,                              // radicado completo 23 dígitos
+      anioRad + consecRad,            // "202300682"
+      anioRad + consecSinCeros,       // "2023682"
+      anioRad + "0" + consecSinCeros, // "20230682"
+    ];
     let htmlDetalle = "";
     articleId = null;
 
