@@ -178,105 +178,88 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       waitUntil: "domcontentloaded", timeout: 60000
     });
 
-    // Esperar a que el select #despacho tenga opciones (prueba hasta 30s)
-    console.log("Esperando que Select2 inicialice el select #despacho...");
-    let despachoListo = false;
+    // Helper: seleccionar un valor en un select Select2 vía jQuery
+    const selectJQ = async (id, value, label) => {
+      await page.waitForTimeout(800);
+      const res = await page.evaluate((selId, val) => {
+        const sel = document.getElementById(selId);
+        if (!sel) return `no #${selId}`;
+        const opts = Array.from(sel.options);
+        const opt = opts.find(o => o.value.trim() === val);
+        if (!opt) return `value "${val}" no encontrado en #${selId} (${opts.length} opts, primeros: ${opts.slice(1,4).map(o=>o.value.trim()).join('|')})`;
+        const realVal = opt.value; // puede tener espacio
+        if (typeof jQuery !== 'undefined') {
+          jQuery('#' + selId).val(realVal).trigger('change');
+          return `ok-jq #${selId}="${realVal}"`;
+        }
+        sel.value = realVal;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return `ok-native #${selId}="${realVal}"`;
+      }, id, value);
+      console.log(`  ${label}: ${res}`);
+      return res.startsWith('ok');
+    };
+
+    // Esperar a que el primer select tenga opciones (hasta 30s)
+    console.log("Esperando que los selects inicialicen...");
     for (let i = 0; i < 15; i++) {
       await page.waitForTimeout(2000);
       const count = await page.evaluate(() => {
-        const sel = document.getElementById('despacho');
+        const sel = document.getElementById('departamento') || document.querySelector('select');
         return sel ? sel.options.length : -1;
       });
-      console.log(`  intento ${i+1}: #despacho.options.length = ${count}`);
-      if (count > 10) { despachoListo = true; break; }
-    }
-    if (!despachoListo) {
-      console.warn("El select #despacho no cargó opciones a tiempo");
+      console.log(`  poll ${i+1}: primer select tiene ${count} opciones`);
+      if (count > 1) break;
     }
 
-    // Diagnóstico: qué selects existen en la página
-    const diagnostico = await page.evaluate(() => {
-      const selects = Array.from(document.querySelectorAll('select'));
-      return selects.map(s => ({ id: s.id, name: s.name, optCount: s.options.length, classes: s.className }));
-    });
-    console.log("Selects en página:", JSON.stringify(diagnostico));
+    const { dep, mun, tipo, esp } = parsed;
 
-    // 2. Seleccionar Departamento primero (los 2 primeros dígitos del despachoCod)
-    const { dep } = parsed;
-    console.log("Seleccionando Departamento:", dep);
-    const depOk = await page.evaluate((depVal) => {
-      const sel = document.getElementById('departamento');
-      if (!sel) return 'no #departamento';
-      const opt = Array.from(sel.options).find(o => o.value.trim() === depVal);
-      if (!opt) return 'dep option no encontrado: ' + depVal + ' (opciones: ' + Array.from(sel.options).slice(0,5).map(o=>o.value).join(',') + ')';
-      if (typeof jQuery !== 'undefined') {
-        jQuery('#departamento').val(opt.value).trigger('change');
-        return 'ok-jquery:' + opt.value;
-      }
-      sel.value = opt.value;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      return 'ok-native:' + opt.value;
-    }, dep);
-    console.log("Departamento resultado:", depOk);
-    await page.waitForTimeout(2000);
-
-    // 3. Seleccionar Despacho via jQuery/Select2
-    console.log("Seleccionando Despacho:", despachoCod);
-    const despachoOk = await page.evaluate((cod) => {
-      const sel = document.getElementById('despacho');
-      if (!sel) return 'no select#despacho';
-      const opt = Array.from(sel.options).find(o => o.value.trim() === cod);
-      if (!opt) return 'option no encontrado: ' + cod + ' (total opts: ' + sel.options.length + ', primeros: ' + Array.from(sel.options).slice(0,3).map(o=>o.value.trim()).join('|') + ')';
-      if (typeof jQuery !== 'undefined') {
-        jQuery('#despacho').val(opt.value).trigger('change');
-        return 'ok-jquery:' + opt.value;
-      }
-      sel.value = opt.value;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      return 'ok-native:' + opt.value;
-    }, despachoCod);
-    console.log("Despacho resultado:", despachoOk);
+    // Cascada: Departamento → Municipio → Entidad/Tipo → Especialidad → Despacho
+    await selectJQ('departamento', dep, 'Departamento');
     await page.waitForTimeout(1500);
 
-    // 4. Ajustar fechas
+    await selectJQ('municipio', mun, 'Municipio');
+    await page.waitForTimeout(1500);
+
+    await selectJQ('entidad', tipo, 'Entidad/Tipo');
+    await page.waitForTimeout(1500);
+
+    await selectJQ('especialidad', esp, 'Especialidad');
+    await page.waitForTimeout(1500);
+
+    await selectJQ('despacho', despachoCod, 'Despacho');
+    await page.waitForTimeout(1500);
+
+    // Fechas: rango centrado en fechaActuacion
     if (fechaActuacion) {
       try {
-        const fActuacion = new Date(fechaActuacion);
-        const fInicio = new Date(fActuacion);
-        fInicio.setMonth(fInicio.getMonth() - 3);
-        const fFin = new Date(fActuacion);
-        fFin.setMonth(fFin.getMonth() + 1);
+        const fAct = new Date(fechaActuacion);
+        const fIni = new Date(fAct); fIni.setMonth(fIni.getMonth() - 3);
+        const fFin = new Date(fAct); fFin.setMonth(fFin.getMonth() + 1);
         const fmt = d => d.toISOString().substring(0, 10);
-        const fechaOk = await page.evaluate((fi, ff) => {
+        const fRes = await page.evaluate((fi, ff) => {
           const inputs = document.querySelectorAll('input[type="date"]');
           if (inputs[0]) { inputs[0].value = fi; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
           if (inputs[1]) { inputs[1].value = ff; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
-          return `inputs encontrados: ${inputs.length}`;
-        }, fmt(fInicio), fmt(fFin));
-        console.log("Fechas:", fmt(fInicio), "->", fmt(fFin), "|", fechaOk);
-      } catch(dateErr) { console.warn("Error ajustando fechas:", dateErr.message); }
+          return `${inputs.length} date inputs`;
+        }, fmt(fIni), fmt(fFin));
+        console.log(`  Fechas ${fmt(fIni)} -> ${fmt(fFin)} | ${fRes}`);
+      } catch(e) { console.warn("Error fechas:", e.message); }
     }
 
-    // 5. Clic en BUSCAR (id="buscar")
+    // BUSCAR
     console.log("Haciendo clic en BUSCAR...");
     const buscarOk = await page.evaluate(() => {
-      const btn = document.getElementById('buscar');
-      if (btn) { btn.click(); return 'clicked'; }
-      // fallback: cualquier input submit
-      const sub = document.querySelector('input[type="submit"]');
-      if (sub) { sub.click(); return 'clicked-submit'; }
-      return 'no buscar encontrado';
+      const btn = document.getElementById('buscar') || document.querySelector('input[type="submit"]');
+      if (btn) { btn.click(); return `clicked #${btn.id || btn.type}`; }
+      return 'no encontrado';
     });
-    console.log("BUSCAR:", buscarOk);
-    // Esperar que carguen los resultados
+    console.log("  BUSCAR:", buscarOk);
     await page.waitForTimeout(7000);
 
-    // Diagnóstico: qué hay en la página de resultados
-    const htmlResumen = await page.evaluate(() => {
-      const body = document.body.innerText || document.body.textContent || '';
-      return body.substring(0, 800);
-    });
-    console.log("Página tras BUSCAR (primeros 800 chars):", htmlResumen);
+    // Diagnóstico: primeros 600 chars del texto de resultados
+    const textoResultados = await page.evaluate(() => (document.body.innerText || '').substring(0, 600));
+    console.log("Texto resultados:", textoResultados);
 
     // 6. Buscar el documento con idRegActuacion en los resultados
     console.log("Buscando documento con idRegActuacion:", idRegActuacion);
