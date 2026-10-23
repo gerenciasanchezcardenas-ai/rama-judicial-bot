@@ -2,6 +2,8 @@ require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const { consultarPorNombre, consultarPorRadicado, obtenerActuaciones } = require("./src/ramaJudicial");
 
 const app = express();
@@ -44,8 +46,30 @@ async function enviarMensaje(telefono, texto) {
 }
 
 async function enviarDocumento(telefono, pdfBuffer, filename, caption) {
-  // Por ahora enviamos el caption como texto (Twilio requiere URL pública para media)
-  await enviarMensaje(telefono, caption || filename);
+  try {
+    // Guardar PDF temporalmente y servirlo como URL pública
+    const tmpDir = path.join(__dirname, "tmp_pdfs");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = path.join(tmpDir, filename);
+    fs.writeFileSync(tmpFile, pdfBuffer);
+    const pdfUrl = `https://rama-judicial-bot.onrender.com/pdf/${encodeURIComponent(filename)}`;
+    // Enviar como media via Twilio
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    const from = TWILIO_WHATSAPP_NUMBER.startsWith("whatsapp:") ? TWILIO_WHATSAPP_NUMBER : `whatsapp:${TWILIO_WHATSAPP_NUMBER}`;
+    const to = telefono.startsWith("whatsapp:") ? telefono : `whatsapp:${telefono}`;
+    await axios.post(url,
+      new URLSearchParams({ From: from, To: to, Body: caption || filename, MediaUrl: pdfUrl }).toString(),
+      {
+        auth: { username: TWILIO_ACCOUNT_SID, password: TWILIO_AUTH_TOKEN },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      }
+    );
+    // Limpiar archivo después de 5 minutos
+    setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch(e) {} }, 5 * 60 * 1000);
+  } catch (e) {
+    console.error("Error enviando documento:", e.response?.data || e.message);
+    await enviarMensaje(telefono, caption || filename);
+  }
 }
 
 function tieneMicrositio(act) {
@@ -90,9 +114,28 @@ async function crearLinkPago(referencia, descripcion) {
 
 async function descargarPdfMicrositio(url) {
   try {
-    const res = await axios.get(url, { responseType: "arraybuffer", timeout: 30000,
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/pdf,*/*" } });
-    if (res.headers["content-type"]?.includes("pdf")) return Buffer.from(res.data);
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "es-CO,es;q=0.9",
+      "Referer": "https://publicacionesprocesales.ramajudicial.gov.co/"
+    };
+    // Primero cargamos la página del portlet para extraer el link del PDF
+    const pageRes = await axios.get(url, { timeout: 30000, headers });
+    const html = pageRes.data || "";
+    // Buscar el link del PDF en la página
+    const match = html.match(/href="([^"]*document_library\/get_file[^"]*)"/i)
+      || html.match(/href="([^"]*\.pdf[^"]*)"/i);
+    if (match) {
+      let pdfUrl = match[1];
+      if (pdfUrl.startsWith("/")) pdfUrl = "https://publicacionesprocesales.ramajudicial.gov.co" + pdfUrl;
+      console.log("PDF URL encontrada:", pdfUrl);
+      const pdfRes = await axios.get(pdfUrl, { responseType: "arraybuffer", timeout: 30000, headers });
+      if (pdfRes.headers["content-type"]?.includes("pdf") || pdfUrl.includes(".pdf")) {
+        return Buffer.from(pdfRes.data);
+      }
+    }
+    console.log("No se encontró link PDF en la página, html length:", html.length);
     return null;
   } catch (e) {
     console.error("Error descargando PDF:", e.message);
@@ -305,6 +348,17 @@ app.post("/wompi-webhook", async (req, res) => {
   } catch (e) {
     console.error("Error en webhook Wompi:", e.message);
     res.status(500).json({ error: "Internal error" });
+  }
+});
+
+app.get("/pdf/:filename", (req, res) => {
+  const filename = req.params.filename;
+  const filepath = path.join(__dirname, "tmp_pdfs", filename);
+  if (fs.existsSync(filepath)) {
+    res.setHeader("Content-Type", "application/pdf");
+    res.sendFile(filepath);
+  } else {
+    res.status(404).send("Documento no disponible");
   }
 });
 
