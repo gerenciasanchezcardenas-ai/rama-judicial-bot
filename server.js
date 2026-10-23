@@ -1,41 +1,125 @@
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const { consultarPorNombre, consultarPorRadicado, obtenerActuaciones, linkMicrositio } = require("./src/ramaJudicial");
+const crypto = require("crypto");
+const { consultarPorNombre, consultarPorRadicado, obtenerActuaciones } = require("./src/ramaJudicial");
 
 const app = express();
+
+app.use("/wompi-webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.D360_API_KEY;
 const API_URL = "https://waba-sandbox.360dialog.io/v1/messages";
 
+const WOMPI_PRIVATE_KEY = process.env.WOMPI_PRIVATE_KEY || "prv_prod_2A43U6Iijwv3eV0gCV25a2Ab7qjQNePa";
+const WOMPI_EVENTS_SECRET = process.env.WOMPI_EVENTS_SECRET || "prod_events_Rm3upKCLaRYHoQki8QICIoQ6G2V9ShqA";
+const WOMPI_API = "https://production.wompi.co/v1";
+const COBRO_CENTAVOS = 5000000;
+
 const sesiones = {};
+const pendingPayments = {};
 
 async function enviarMensaje(telefono, texto) {
-  await axios.post(
-    API_URL,
-    {
-      messaging_product: "whatsapp",
-      to: telefono,
-      type: "text",
-      text: { body: texto },
-    },
+  await axios.post(API_URL,
+    { messaging_product: "whatsapp", to: telefono, type: "text", text: { body: texto } },
     { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
   );
 }
 
+async function enviarDocumento(telefono, pdfBuffer, filename, caption) {
+  const FormData = require("form-data");
+  const form = new FormData();
+  form.append("file", pdfBuffer, { filename, contentType: "application/pdf" });
+  form.append("messaging_product", "whatsapp");
+  const uploadRes = await axios.post("https://waba-sandbox.360dialog.io/v1/media", form,
+    { headers: { "D360-API-KEY": API_KEY, ...form.getHeaders() } });
+  const mediaId = uploadRes.data?.id;
+  if (!mediaId) throw new Error("No se obtuvo media ID");
+  await axios.post(API_URL,
+    { messaging_product: "whatsapp", to: telefono, type: "document",
+      document: { id: mediaId, filename, caption } },
+    { headers: { "D360-API-KEY": API_KEY, "Content-Type": "application/json" } }
+  );
+}
+
+function tieneMicrositio(act) {
+  if (!act) return false;
+  const ann = (act.anotacion || "").toLowerCase();
+  const tip = (act.actuacion || "").toLowerCase();
+  return (
+    ann.includes("publicado") || ann.includes("micrositio") || ann.includes("ramajudicial.gov.co") ||
+    tip.includes("auto") || tip.includes("sentencia") || tip.includes("providencia") ||
+    tip.includes("fallo") || tip.includes("resolucion") ||
+    (act.idRegActuacion && ann.length > 20)
+  );
+}
+
+function micrositioUrl(radicado, idRegActuacion) {
+  const r = (radicado || "").replace(/\s/g, "");
+  if (r.length >= 21) {
+    const year = r.substring(12, 16);
+    const num = r.substring(16, 21);
+    const articleId = `${year}-${num}`;
+    const portletId = "co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq";
+    return `https://www.ramajudicial.gov.co/web/efectos-procesales-1/-/publicaciones-efectos-procesales?p_p_id=${portletId}&p_p_lifecycle=0&_${portletId}_articleId=${articleId}&_${portletId}_idRegActuacion=${idRegActuacion}`;
+  }
+  return null;
+}
+
+async function crearLinkPago(referencia, descripcion) {
+  try {
+    const res = await axios.post(`${WOMPI_API}/payment_links`,
+      { name: descripcion, description: "Documento proceso judicial – Sánchez & Cárdenas",
+        single_use: true, collect_shipping: false, currency: "COP",
+        amount_in_cents: COBRO_CENTAVOS, redirect_url: "https://sanchezcardenasconsulting.com",
+        reference: referencia },
+      { headers: { Authorization: `Bearer ${WOMPI_PRIVATE_KEY}`, "Content-Type": "application/json" } }
+    );
+    return res.data?.data?.url || null;
+  } catch (e) {
+    console.error("Error creando link Wompi:", e.response?.data || e.message);
+    return null;
+  }
+}
+
+async function descargarPdfMicrositio(url) {
+  try {
+    const res = await axios.get(url, { responseType: "arraybuffer", timeout: 30000,
+      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/pdf,*/*" } });
+    if (res.headers["content-type"]?.includes("pdf")) return Buffer.from(res.data);
+    return null;
+  } catch (e) {
+    console.error("Error descargando PDF:", e.message);
+    return null;
+  }
+}
+
+function renderActuaciones(actuaciones, radicado, despacho) {
+  let msg = `📋 *Últimas actuaciones — ${radicado}*\n`;
+  msg += `Despacho: ${(despacho || "N/A").substring(0, 60)}\n\n`;
+  for (let i = 0; i < actuaciones.length; i++) {
+    const a = actuaciones[i];
+    const doc = tieneMicrositio(a) ? "📄 Con documento" : "❌ Sin documento";
+    msg += `*${i + 1}.* ${a.actuacion}\n`;
+    msg += `   📅 ${a.fechaActuacion || "Sin fecha"} — ${doc}\n`;
+    if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
+    msg += "\n";
+  }
+  msg += `Responda el *número* de la actuación para obtener el documento, o *0* para salir.\n`;
+  msg += `_(Solo actuaciones con 📄 tienen documento disponible para descarga)_`;
+  return msg;
+}
+
 app.post("/webhook", async (req, res) => {
   res.json({ status: "ok" });
-
   try {
     const mensaje_obj = req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!mensaje_obj || mensaje_obj.type !== "text") return;
-
     const telefono = mensaje_obj.from;
     const mensaje = mensaje_obj.text.body.trim();
     const sesion = sesiones[telefono] || { paso: "inicio" };
-
     let respuesta = "";
 
     if (sesion.paso === "inicio") {
@@ -77,41 +161,27 @@ app.post("/webhook", async (req, res) => {
       const tipoPersona = sesion.tipoPersona || "nat";
       await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
       const resultado = await consultarPorNombre(mensaje, tipoPersona);
-
       if (!resultado.tieneProcesos || resultado.procesos.length === 0) {
         sesiones[telefono] = { paso: "inicio" };
         respuesta = resultado.mensaje || "No se encontraron procesos para ese nombre.";
       } else if (resultado.procesos.length === 1) {
-        // Solo un proceso: ir directo a actuaciones
         const proceso = resultado.procesos[0];
-        sesiones[telefono] = { paso: "inicio" };
         await enviarMensaje(telefono, "⏳ Cargando actuaciones...");
-        const actuaciones = await obtenerActuaciones(proceso.idProceso, 7);
+        const actuaciones = await obtenerActuaciones(proceso.idProceso, 10);
         if (!actuaciones || actuaciones.length === 0) {
+          sesiones[telefono] = { paso: "inicio" };
           respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\nDespacho: " + (proceso.despacho || "N/A");
         } else {
-          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, idProceso: proceso.idProceso, actuaciones };
-          let msg = `📋 *Actuaciones — ${proceso.llaveProceso}*\nDespacho: ${proceso.despacho || "N/A"}\n\n`;
-          for (let i = 0; i < actuaciones.length; i++) {
-            const a = actuaciones[i];
-            msg += `*${i + 1}.* ${a.actuacion}\n   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
-            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
-            msg += "\n";
-          }
-          msg += `Responda el *número* de la actuación para ver el documento, o *0* para salir.`;
-          respuesta = msg;
+          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, despacho: proceso.despacho, actuaciones };
+          respuesta = renderActuaciones(actuaciones, proceso.llaveProceso, proceso.despacho);
         }
       } else {
-        // Varios procesos: mostrarlos numerados para que el usuario elija
         const lista = resultado.procesos.slice(0, 8);
         sesiones[telefono] = { paso: "esperando_seleccion_proceso", procesos: lista };
-        let msg = `✅ Se encontraron *${resultado.cantidad}* proceso(s) para ese nombre.\n\n`;
-        msg += `Mostrando los primeros ${lista.length}:\n\n`;
+        let msg = `✅ Se encontraron *${resultado.cantidad}* proceso(s).\n\nMostrando los primeros ${lista.length}:\n\n`;
         for (let i = 0; i < lista.length; i++) {
           const p = lista[i];
-          msg += `*${i + 1}.* ${p.llaveProceso || "N/A"}\n`;
-          msg += `   Despacho: ${(p.despacho || "N/A").substring(0, 60)}\n`;
-          msg += `   Fecha: ${(p.fechaProceso || "").substring(0, 10) || "N/A"}\n\n`;
+          msg += `*${i + 1}.* ${p.llaveProceso || "N/A"}\n   Despacho: ${(p.despacho || "N/A").substring(0, 60)}\n   Fecha: ${(p.fechaProceso || "").substring(0, 10) || "N/A"}\n\n`;
         }
         msg += `Responda el *número* del proceso que desea consultar, o *0* para salir.`;
         respuesta = msg;
@@ -120,7 +190,6 @@ app.post("/webhook", async (req, res) => {
     } else if (sesion.paso === "esperando_seleccion_proceso") {
       const num = parseInt(mensaje, 10);
       const { procesos } = sesion;
-
       if (mensaje === "0" || isNaN(num)) {
         sesiones[telefono] = { paso: "inicio" };
         respuesta = "Consulta finalizada. Escriba cualquier mensaje para iniciar de nuevo.";
@@ -129,71 +198,38 @@ app.post("/webhook", async (req, res) => {
       } else {
         const proceso = procesos[num - 1];
         await enviarMensaje(telefono, "⏳ Cargando actuaciones...");
-        const actuaciones = await obtenerActuaciones(proceso.idProceso, 7);
+        const actuaciones = await obtenerActuaciones(proceso.idProceso, 10);
         if (!actuaciones || actuaciones.length === 0) {
           sesiones[telefono] = { paso: "inicio" };
           respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\nDespacho: " + (proceso.despacho || "N/A");
         } else {
-          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, idProceso: proceso.idProceso, actuaciones };
-          let msg = `📋 *Actuaciones — ${proceso.llaveProceso}*\nDespacho: ${proceso.despacho || "N/A"}\n\n`;
-          for (let i = 0; i < actuaciones.length; i++) {
-            const a = actuaciones[i];
-            msg += `*${i + 1}.* ${a.actuacion}\n   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
-            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
-            msg += "\n";
-          }
-          msg += `Responda el *número* de la actuación para ver el documento, o *0* para salir.`;
-          respuesta = msg;
+          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado: proceso.llaveProceso, despacho: proceso.despacho, actuaciones };
+          respuesta = renderActuaciones(actuaciones, proceso.llaveProceso, proceso.despacho);
         }
       }
 
     } else if (sesion.paso === "esperando_radicado") {
       const radicado = mensaje.replace(/\s/g, "");
       await enviarMensaje(telefono, "⏳ Consultando en la Rama Judicial... un momento.");
-
-      // Primero buscamos el proceso para obtener idProceso
       const resultado = await consultarPorRadicado(radicado);
-
       if (!resultado.tieneProcesos || resultado.procesos.length === 0) {
         sesiones[telefono] = { paso: "inicio" };
         respuesta = resultado.mensaje || "No se encontró el proceso para ese radicado.";
       } else {
         const proceso = resultado.procesos[0];
-        const idProceso = proceso.idProceso;
-
-        // Traemos las últimas 7 actuaciones
-        const actuaciones = await obtenerActuaciones(idProceso, 7);
-
+        const actuaciones = await obtenerActuaciones(proceso.idProceso, 10);
         if (!actuaciones || actuaciones.length === 0) {
           sesiones[telefono] = { paso: "inicio" };
-          respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\n\nDespacho: " + (proceso.despacho || "N/A");
+          respuesta = "✅ Proceso encontrado pero sin actuaciones registradas.\nDespacho: " + (proceso.despacho || "N/A");
         } else {
-          // Guardamos en sesión: radicado, idProceso, lista de actuaciones
-          sesiones[telefono] = {
-            paso: "esperando_seleccion_actuacion",
-            radicado,
-            idProceso,
-            actuaciones,
-          };
-
-          let msg = `📋 *Últimas actuaciones — Radicado ${radicado}*\n`;
-          msg += `Despacho: ${proceso.despacho || "N/A"}\n\n`;
-          for (let i = 0; i < actuaciones.length; i++) {
-            const a = actuaciones[i];
-            msg += `*${i + 1}.* ${a.actuacion}\n`;
-            msg += `   📅 ${a.fechaActuacion || "Sin fecha"}\n`;
-            if (a.anotacion) msg += `   📝 ${a.anotacion.substring(0, 80)}${a.anotacion.length > 80 ? "..." : ""}\n`;
-            msg += "\n";
-          }
-          msg += `Responda el *número* de la actuación para ver el documento en el micrositio, o *0* para salir.`;
-          respuesta = msg;
+          sesiones[telefono] = { paso: "esperando_seleccion_actuacion", radicado, despacho: proceso.despacho, actuaciones };
+          respuesta = renderActuaciones(actuaciones, radicado, proceso.despacho);
         }
       }
 
     } else if (sesion.paso === "esperando_seleccion_actuacion") {
       const num = parseInt(mensaje, 10);
       const { radicado, actuaciones } = sesion;
-
       if (mensaje === "0" || isNaN(num)) {
         sesiones[telefono] = { paso: "inicio" };
         respuesta = "Consulta finalizada. Escriba cualquier mensaje para iniciar de nuevo.";
@@ -202,15 +238,27 @@ app.post("/webhook", async (req, res) => {
       } else {
         const act = actuaciones[num - 1];
         sesiones[telefono] = { paso: "inicio" };
-
-        const link = linkMicrositio(radicado, act.idRegActuacion);
-
-        let msg = `📄 *${act.actuacion}*\n`;
-        msg += `📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
-        if (act.anotacion) msg += `📝 ${act.anotacion}\n`;
-        msg += `\n🔗 Consulte el documento en el micrositio:\n${link}`;
-        msg += `\n\n💼 Si desea descargar este documento, comuníquese con nosotros:\n📞 +57 313 829 1633`;
-        respuesta = msg;
+        if (!tieneMicrositio(act)) {
+          let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
+          if (act.anotacion) msg += `📝 ${act.anotacion}\n\n`;
+          msg += `❌ Esta actuación *no tiene documento publicado* en el micrositio.\n\nComuníquese con nosotros:\n📞 +57 313 829 1633`;
+          respuesta = msg;
+        } else {
+          const referencia = `bot_${telefono}_${Date.now()}`;
+          const linkPago = await crearLinkPago(referencia, `Documento ${act.actuacion.substring(0, 50)}`);
+          if (!linkPago) {
+            respuesta = `⚠️ No podemos procesar el pago en línea ahora.\nComuníquese con nosotros:\n📞 +57 313 829 1633`;
+          } else {
+            const docUrl = micrositioUrl(radicado, act.idRegActuacion);
+            pendingPayments[referencia] = { telefono, act, radicado, micrositioUrl: docUrl };
+            let msg = `📄 *${act.actuacion}*\n📅 Fecha: ${act.fechaActuacion || "N/A"}\n`;
+            if (act.anotacion) msg += `📝 ${act.anotacion.substring(0, 120)}\n\n`;
+            msg += `✅ *Esta actuación tiene documento publicado en el micrositio.*\n\n`;
+            msg += `💳 Para recibir el documento en este chat, realice el pago de *$50.000 COP*:\n\n🔗 ${linkPago}\n\n`;
+            msg += `_Una vez confirmado el pago, le enviaremos el PDF automáticamente._`;
+            respuesta = msg;
+          }
+        }
       }
 
     } else {
@@ -219,9 +267,49 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (respuesta) await enviarMensaje(telefono, respuesta);
-
   } catch (e) {
-    console.error("Error en webhook:", e.message);
+    console.error("Error en webhook WhatsApp:", e.message);
+  }
+});
+
+app.post("/wompi-webhook", async (req, res) => {
+  try {
+    const signature = req.headers["x-event-checksum"];
+    const body = req.body;
+    const expected = crypto.createHmac("sha256", WOMPI_EVENTS_SECRET).update(body).digest("hex");
+    if (signature !== expected) {
+      console.warn("Firma Wompi inválida");
+      return res.status(401).json({ error: "Invalid signature" });
+    }
+    const event = JSON.parse(body.toString());
+    res.json({ status: "ok" });
+    const txData = event?.data?.transaction;
+    if (!txData) return;
+    const { reference, status } = txData;
+    console.log(`Wompi evento: ref=${reference} status=${status}`);
+    if (status !== "APPROVED") return;
+    const pending = pendingPayments[reference];
+    if (!pending) { console.warn("Pago aprobado sin pendiente:", reference); return; }
+    const { telefono, act, radicado, micrositioUrl: docUrl } = pending;
+    delete pendingPayments[reference];
+    await enviarMensaje(telefono, `✅ *¡Pago confirmado!* Gracias.\n\n⏳ Descargando el documento del micrositio...`);
+    let enviado = false;
+    if (docUrl) {
+      const pdf = await descargarPdfMicrositio(docUrl);
+      if (pdf) {
+        const filename = `${(radicado || "doc").replace(/\s/g, "_")}_${act.fechaActuacion || "doc"}.pdf`;
+        await enviarDocumento(telefono, pdf, filename, `📄 ${act.actuacion} — ${act.fechaActuacion || ""}`);
+        enviado = true;
+      }
+    }
+    if (!enviado) {
+      let msg = `📄 *${act.actuacion}*\n📅 ${act.fechaActuacion || "N/A"}\n\n`;
+      msg += `No fue posible descargar el PDF automáticamente.\nConsúltelo en:\n🔗 ${docUrl || "https://publicacionesprocesales.ramajudicial.gov.co/"}\n\nO llámenos:\n📞 +57 313 829 1633`;
+      await enviarMensaje(telefono, msg);
+    }
+  } catch (e) {
+    console.error("Error en webhook Wompi:", e.message);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 

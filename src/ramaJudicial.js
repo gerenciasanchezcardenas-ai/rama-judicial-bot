@@ -57,34 +57,49 @@ async function consultarPorRadicado(radicado) {
   }
 }
 
-// ── NUEVA FUNCIÓN ────────────────────────────────────────────────────────────
-// Trae únicamente la última actuación de un proceso dado su idProceso numérico.
-// Retorna un objeto con { actuacion, anotacion, fechaActuacion, fechaFinTermino }
-// o null si no hay actuaciones o la API falla.
+// Trae únicamente la última actuación (compatibilidad con sync-rama-judicial)
 async function obtenerUltimaActuacion(idProceso) {
+  const lista = await obtenerActuaciones(idProceso, 1);
+  return lista && lista.length > 0 ? lista[0] : null;
+}
+
+// Trae las últimas N actuaciones de un proceso dado su idProceso numérico.
+// Retorna array de { actuacion, anotacion, fechaActuacion, fechaFinTermino, idRegActuacion }
+async function obtenerActuaciones(idProceso, cantidad = 7) {
   try {
     const url = `${BASE_URL}/Proceso/Actuaciones/${idProceso}`;
     const params = { pagina: 1 };
     const response = await axios.get(url, { params, headers: HEADERS, timeout: 20000 });
     const data = response.data;
-    // La API devuelve { actuaciones: [...] } ordenadas de más reciente a más antigua
     if (data && data.actuaciones && data.actuaciones.length > 0) {
-      const ult = data.actuaciones[0];
-      return {
-        actuacion: ult.actuacion || "",
-        anotacion: ult.anotacion || "",
-        fechaActuacion: (ult.fechaActuacion || "").substring(0, 10),
-        fechaFinTermino: (ult.fechaFinTermino || "").substring(0, 10),
-        fechaRegistro: (ult.fechaRegistro || "").substring(0, 10),
-      };
+      return data.actuaciones.slice(0, cantidad).map(a => ({
+        actuacion: a.actuacion || "",
+        anotacion: a.anotacion || "",
+        fechaActuacion: (a.fechaActuacion || "").substring(0, 10),
+        fechaFinTermino: (a.fechaFinTermino || "").substring(0, 10),
+        fechaRegistro: (a.fechaRegistro || "").substring(0, 10),
+        idRegActuacion: a.idRegActuacion || null,
+      }));
     }
-    return null;
+    return [];
   } catch (error) {
-    console.error("Error obtenerUltimaActuacion idProceso=" + idProceso + ":", error.message);
-    return null;
+    console.error("Error obtenerActuaciones idProceso=" + idProceso + ":", error.message);
+    return [];
   }
 }
-// ─────────────────────────────────────────────────────────────────────────────
+
+// Construye el link directo al micrositio para una actuación
+function linkMicrositio(radicado, idRegActuacion) {
+  // Formato del radicado para el micrositio: AAAA-NNNNN (posiciones 12-15 y 16-20)
+  const r = radicado.replace(/\s/g, "");
+  if (r.length >= 21) {
+    const year = r.substring(12, 16);
+    const num = r.substring(16, 21);
+    const fragment = `${year}-${num}`;
+    return `https://publicacionesprocesales.ramajudicial.gov.co/index.html#/detail/${fragment}`;
+  }
+  return `https://publicacionesprocesales.ramajudicial.gov.co/`;
+}
 
 function procesarRespuesta(data, termino) {
   if (data && data.StatusCode === 400) {
@@ -147,4 +162,4 @@ function manejarError(error) {
   };
 }
 
-module.exports = { consultarPorNombre, consultarPorRadicado, obtenerUltimaActuacion };
+module.exports = { consultarPorNombre, consultarPorRadicado, obtenerUltimaActuacion, obtenerActuaciones, linkMicrositio };
