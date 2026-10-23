@@ -257,23 +257,55 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       return null;
     }
 
-    // Usar el primer articleId encontrado
-    // Si hay varios, intentar encontrar el que corresponde al radicado buscando en el contexto
-    let articleId = articleIds[0];
-    const radicadoCorto = r.substring(16, 21); // últimos 5 dígitos del consecutivo
+    // Buscar el articleId que corresponde al radicado correcto
+    // El radicado tiene partes identificadoras: año (pos 12-15) y consecutivo (pos 16-20)
+    const anioRad   = r.substring(12, 16); // e.g. "2023"
+    const consecRad = r.substring(16, 21); // e.g. "00068"
+    // También intentar con el radicado completo sin espacios
+    const buscarEn = [r, anioRad + consecRad, consecRad, anioRad];
+
+    let articleId = null;
+    // Primer intento: buscar por contexto cercano al articleId
     for (const aid of articleIds) {
-      // Buscar el contexto alrededor de este articleId en el HTML
       const idx = htmlBusq.indexOf(`articleId=${aid}`);
       if (idx > -1) {
-        const contexto = htmlBusq.substring(Math.max(0, idx - 300), idx + 300);
-        if (contexto.includes(radicadoCorto) || contexto.includes(r.substring(12, 16))) {
-          articleId = aid;
-          console.log(`[micrositio] articleId=${aid} coincide con radicado`);
-          break;
+        const contexto = htmlBusq.substring(Math.max(0, idx - 500), idx + 500);
+        for (const token of buscarEn) {
+          if (token && contexto.includes(token)) {
+            articleId = aid;
+            console.log(`[micrositio] articleId=${aid} coincide por token="${token}"`);
+            break;
+          }
+        }
+        if (articleId) break;
+      }
+    }
+
+    // Segundo intento: buscar en todo el HTML cuál bloque contiene el radicado
+    if (!articleId) {
+      for (const token of buscarEn) {
+        if (!token) continue;
+        const idxToken = htmlBusq.indexOf(token);
+        if (idxToken > -1) {
+          // Buscar el articleId más cercano a este token
+          const ventana = htmlBusq.substring(Math.max(0, idxToken - 1000), idxToken + 1000);
+          const mLocal = /articleId[=\s:"']+(\d{6,12})/i.exec(ventana);
+          if (mLocal) {
+            articleId = mLocal[1];
+            console.log(`[micrositio] articleId=${articleId} encontrado cerca de token="${token}"`);
+            break;
+          }
         }
       }
     }
-    console.log(`[micrositio] usando articleId=${articleId}`);
+
+    // Fallback: usar el primero (puede ser incorrecto si hay varios procesos del mismo juzgado)
+    if (!articleId) {
+      articleId = articleIds[0];
+      console.log(`[micrositio] FALLBACK usando primer articleId=${articleId} (puede no corresponder al radicado)`);
+    } else {
+      console.log(`[micrositio] usando articleId=${articleId}`);
+    }
 
     // ── PASO 4: GET detalle del artículo ──
     const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${articleId}`;
