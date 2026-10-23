@@ -66,26 +66,32 @@ async function obtenerUltimaActuacion(idProceso) {
 // Trae las últimas N actuaciones de un proceso dado su idProceso numérico.
 // Retorna array de { actuacion, anotacion, fechaActuacion, fechaFinTermino, idRegActuacion }
 async function obtenerActuaciones(idProceso, cantidad = 7) {
-  try {
-    const url = `${BASE_URL}/Proceso/Actuaciones/${idProceso}`;
-    const params = { pagina: 1 };
-    const response = await axios.get(url, { params, headers: HEADERS, timeout: 20000 });
-    const data = response.data;
-    if (data && data.actuaciones && data.actuaciones.length > 0) {
-      return data.actuaciones.slice(0, cantidad).map(a => ({
-        actuacion: a.actuacion || "",
-        anotacion: a.anotacion || "",
-        fechaActuacion: (a.fechaActuacion || "").substring(0, 10),
-        fechaFinTermino: (a.fechaFinTermino || "").substring(0, 10),
-        fechaRegistro: (a.fechaRegistro || "").substring(0, 10),
-        idRegActuacion: a.idRegActuacion || null,
-      }));
+  const intentos = 3;
+  for (let i = 1; i <= intentos; i++) {
+    try {
+      const url = `${BASE_URL}/Proceso/Actuaciones/${idProceso}`;
+      const params = { pagina: 1 };
+      const response = await axios.get(url, { params, headers: HEADERS, timeout: 25000 });
+      const data = response.data;
+      if (data && data.actuaciones && data.actuaciones.length > 0) {
+        console.log(`obtenerActuaciones OK en intento ${i}, idProceso=${idProceso}`);
+        return data.actuaciones.slice(0, cantidad).map(a => ({
+          actuacion: a.actuacion || "",
+          anotacion: a.anotacion || "",
+          fechaActuacion: (a.fechaActuacion || "").substring(0, 10),
+          fechaFinTermino: (a.fechaFinTermino || "").substring(0, 10),
+          fechaRegistro: (a.fechaRegistro || "").substring(0, 10),
+          idRegActuacion: a.idRegActuacion || null,
+        }));
+      }
+      console.log(`obtenerActuaciones devolvió vacío (intento ${i}/${intentos}), idProceso=${idProceso}`);
+      if (i < intentos) await new Promise(r => setTimeout(r, 2000));
+    } catch (error) {
+      console.error(`Error obtenerActuaciones intento ${i}/${intentos} idProceso=${idProceso}:`, error.message);
+      if (i < intentos) await new Promise(r => setTimeout(r, 2000));
     }
-    return [];
-  } catch (error) {
-    console.error("Error obtenerActuaciones idProceso=" + idProceso + ":", error.message);
-    return [];
   }
+  return [];
 }
 
 // Construye el link directo al micrositio para una actuación
