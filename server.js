@@ -301,7 +301,9 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
 
     // ── PASO 4: recorrer cada articleId buscando el que contiene el radicado en su detalle ──
     // El HTML de búsqueda NO incluye el radicado — hay que entrar al detalle de cada uno
-    const tokensRad = [r, anioRad + consecRad, consecRad];
+    // Tokens en orden de especificidad — el radicado completo primero, luego año+consecutivo
+    // NO usar solo el consecutivo (00682) porque puede coincidir con otros años del mismo juzgado
+    const tokensRad = [r, anioRad + consecRad, anioRad + "0" + consecRad];
     let htmlDetalle = "";
     articleId = null;
 
@@ -314,6 +316,9 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       });
       const htmlD = dResp.data || "";
       console.log(`[micrositio] detalle ${aid} status=${dResp.status} bytes=${htmlD.length}`);
+      // Log del radicado visible en el detalle para diagnóstico
+      const idxRad = htmlD.search(/\d{23}/);
+      if (idxRad > -1) console.log(`[micrositio] radicado en detalle ${aid}: ${htmlD.substring(idxRad, idxRad+23)}`);
 
       // Verificar si este detalle contiene el radicado
       const coincide = tokensRad.some(t => t && htmlD.includes(t));
