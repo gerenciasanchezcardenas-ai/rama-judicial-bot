@@ -71,14 +71,9 @@ async function enviarArchivo(telefono, buffer, filename, caption) {
 
 function tieneMicrositio(act) {
   if (!act) return false;
-  const ann = (act.anotacion || "").toLowerCase();
   const tip = (act.actuacion || "").toLowerCase();
-  return (
-    ann.includes("publicado") || ann.includes("micrositio") || ann.includes("ramajudicial.gov.co") ||
-    tip.includes("auto") || tip.includes("sentencia") || tip.includes("providencia") ||
-    tip.includes("fallo") || tip.includes("resolucion") ||
-    (act.idRegActuacion && ann.length > 20)
-  );
+  // Solo hay documento publicado en el micrositio cuando es "Fijacion estado"
+  return tip.includes("fijacion estado") || tip.includes("fijación estado");
 }
 
 function parsearRadicado(radicado) {
@@ -253,20 +248,19 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     await selectJQ('despacho', despachoCod, 'Despacho');
     await page.waitForTimeout(1500);
 
-    // Fechas: rango centrado en fechaActuacion
+    // Fecha exacta de la actuación "Fijacion estado"
     if (fechaActuacion) {
       try {
-        const fAct = new Date(fechaActuacion);
-        const fIni = new Date(fAct); fIni.setMonth(fIni.getMonth() - 3);
-        const fFin = new Date(fAct); fFin.setMonth(fFin.getMonth() + 1);
         const fmt = d => d.toISOString().substring(0, 10);
-        const fRes = await page.evaluate((fi, ff) => {
+        const fAct = fmt(new Date(fechaActuacion));
+        const fRes = await page.evaluate((fecha) => {
           const inputs = document.querySelectorAll('input[type="date"]');
-          if (inputs[0]) { inputs[0].value = fi; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
-          if (inputs[1]) { inputs[1].value = ff; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
-          return `${inputs.length} date inputs`;
-        }, fmt(fIni), fmt(fFin));
-        console.log(`  Fechas ${fmt(fIni)} -> ${fmt(fFin)} | ${fRes}`);
+          // Poner la misma fecha en inicio y fin para filtrar exactamente ese día
+          if (inputs[0]) { inputs[0].value = fecha; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
+          if (inputs[1]) { inputs[1].value = fecha; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
+          return `${inputs.length} date inputs → ${fecha}`;
+        }, fAct);
+        console.log(`  Fecha exacta: ${fRes}`);
       } catch(e) { console.warn("Error fechas:", e.message); }
     }
 
@@ -278,69 +272,48 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       return 'no encontrado';
     });
     console.log("  BUSCAR:", buscarOk);
-    await page.waitForTimeout(7000);
+    await page.waitForTimeout(8000);
 
-    // Diagnóstico: primeros 600 chars del texto de resultados
-    const textoResultados = await page.evaluate(() => (document.body.innerText || '').substring(0, 600));
+    // Diagnóstico: texto de resultados
+    const textoResultados = await page.evaluate(() => (document.body.innerText || '').substring(0, 800));
     console.log("Texto resultados:", textoResultados);
 
-    // 6. Buscar el documento con idRegActuacion en los resultados
-    console.log("Buscando documento con idRegActuacion:", idRegActuacion);
-    let pdfUrl = null;
+    // Buscar el proceso por radicado en la tabla de resultados
+    // El radicado puede aparecer como "11001400300220230006800" o con guiones
+    const radicadoLimpio = radicado.replace(/\s/g, "");
+    console.log("Buscando radicado en resultados:", radicadoLimpio);
 
-    // Buscar link que contenga el idRegActuacion en href o en texto cercano
-    pdfUrl = await page.evaluate((idReg, consec, year) => {
-      const idStr = String(idReg);
-      const textoRef = `${year}-${consec}`;
-
-      // 1) Link directo con idRegActuacion
-      let link = Array.from(document.querySelectorAll('a[href]'))
-        .find(a => a.href.includes(idStr));
-      if (link) return link.href;
-
-      // 2) Buscar por texto AAAA-NNNNN en tarjetas/filas y tomar el primer link
-      const allEls = Array.from(document.querySelectorAll('td, .card-body, .item, li, div'));
-      for (const el of allEls) {
-        if (el.children.length === 0 && el.textContent.includes(textoRef)) {
-          const row = el.closest('tr, .card, .publicacion, article, li');
+    // Encontrar la fila/card que contiene el radicado y hacer clic para abrir
+    const filaEncontrada = await page.evaluate((rad) => {
+      const textoNorm = t => (t || "").replace(/[\s\-]/g, "");
+      // Buscar en toda la página un elemento que contenga el radicado
+      const todos = Array.from(document.querySelectorAll('td, span, div, p, li'));
+      for (const el of todos) {
+        if (el.children.length === 0 && textoNorm(el.textContent).includes(rad)) {
+          // Encontró el radicado — subir al contenedor fila/card
+          const row = el.closest('tr, .card, .publicacion, article, li, .proceso');
           if (row) {
-            const a = row.querySelector('a[href]');
-            if (a) return a.href;
+            // Buscar link o botón "ver"/"abrir" dentro de esa fila
+            const link = row.querySelector('a[href], button');
+            if (link) {
+              link.click();
+              return `click en link: ${link.href || link.textContent.trim().substring(0, 50)}`;
+            }
+            // Si no hay link, hacer clic en la fila directamente
+            row.click();
+            return `click en fila que contiene radicado`;
           }
+          return `radicado encontrado pero sin link en fila`;
         }
       }
-
-      // 3) Cualquier link PDF o de documento en la página de resultados
-      const pdfLink = Array.from(document.querySelectorAll('a[href]'))
-        .find(a => /\.(pdf|PDF)/.test(a.href) || /document|archivo|descargar|ver/i.test(a.textContent));
-      if (pdfLink) return pdfLink.href;
-
       return null;
-    }, String(idRegActuacion), consec, year);
+    }, radicadoLimpio);
 
-    if (pdfUrl) {
-      console.log("URL documento encontrada:", pdfUrl);
-      // Descargar con las cookies de sesión
-      const cookies = await page.cookies();
-      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      const pdfRes = await axios.get(pdfUrl, {
-        responseType: "arraybuffer",
-        timeout: 60000,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Cookie": cookieStr,
-          "Accept": "application/pdf,*/*",
-          "Referer": "https://publicacionesprocesales.ramajudicial.gov.co/"
-        }
-      });
-      await browser.close();
-      const contentType = pdfRes.headers["content-type"] || "";
-      const ext = contentType.includes("pdf") ? "pdf" : "bin";
-      return { tipo: "pdf", data: Buffer.from(pdfRes.data), ext };
-    }
+    console.log("Fila radicado:", filaEncontrada);
+    if (filaEncontrada) await page.waitForTimeout(5000);
 
-    // Si no se encontró link, tomar screenshot de los resultados
-    console.log("No se encontró link PDF, tomando screenshot de resultados...");
+    // Tomar screenshot del estado abierto
+    console.log("Tomando screenshot del documento/estado...");
     const screenshot = await page.screenshot({ type: "jpeg", quality: 85, fullPage: true });
     await browser.close();
     console.log("Screenshot tomado, bytes:", screenshot.length);
