@@ -200,7 +200,7 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const fInicio = new Date(); fInicio.setDate(fInicio.getDate() - 60);
     const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
-    console.log(`[micrositio] radicado=${r} despacho=${idDespacho} fecha=${fechaStr} rango=${fmt(fInicio)}→${fmt(fFin)}`);
+    console.log(`[micrositio] radicado=${r} despacho=${idDespacho} rango=${fmt(fInicio)}→${fmt(fFin)}`);
 
     // ── PASO 1: GET sesión para obtener cookies ──
     const homeResp = await axios.get(`${BASE}/web/publicaciones-procesales/inicio`, {
