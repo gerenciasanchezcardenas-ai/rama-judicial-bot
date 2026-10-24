@@ -257,100 +257,62 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       return null;
     }
 
-    // Buscar el articleId que corresponde al radicado correcto
-    // El radicado tiene partes identificadoras: año (pos 12-15) y consecutivo (pos 16-20)
-    const anioRad   = r.substring(12, 16); // e.g. "2023"
-    const consecRad = r.substring(16, 21); // e.g. "00068"
-    // También intentar con el radicado completo sin espacios
-    const buscarEn = [r, anioRad + consecRad, consecRad, anioRad];
+    // ── PASO 3: identificar el articleId del proceso en el HTML de resultados ──
+    // El portal muestra el consecutivo como AAAA+NNN (sin ceros) junto al link de cada publicación
+    // Ejemplo: radicado 11001310304420260045000 → "202600450" en el HTML de búsqueda
+    const anioRad       = r.substring(12, 16);                        // "2026"
+    const consecRad     = r.substring(16, 21);                        // "00045"
+    const consecInt     = String(parseInt(consecRad, 10));             // "45"
+    // Variantes que puede mostrar el portal: con y sin ceros intermedios
+    const tokensEnBusq = [
+      r,                                   // radicado completo
+      anioRad + consecRad,                 // "202600045"
+      anioRad + "0" + consecInt,           // "20260045" — un cero
+      anioRad + "00" + consecInt,          // "202600045" — dos ceros
+      anioRad + consecInt,                 // "202645"
+    ];
 
     let articleId = null;
-    // Primer intento: buscar por contexto cercano al articleId
+    // Buscar en el contexto de cada articleId dentro del HTML de búsqueda
     for (const aid of articleIds) {
       const idx = htmlBusq.indexOf(`articleId=${aid}`);
-      if (idx > -1) {
-        const contexto = htmlBusq.substring(Math.max(0, idx - 500), idx + 500);
-        for (const token of buscarEn) {
-          if (token && contexto.includes(token)) {
-            articleId = aid;
-            console.log(`[micrositio] articleId=${aid} coincide por token="${token}"`);
-            break;
-          }
+      if (idx === -1) continue;
+      const contexto = htmlBusq.substring(Math.max(0, idx - 800), idx + 800);
+      for (const token of tokensEnBusq) {
+        if (token && contexto.includes(token)) {
+          articleId = aid;
+          console.log(`[micrositio] articleId=${aid} coincide en búsqueda por token="${token}"`);
+          break;
         }
-        if (articleId) break;
       }
+      if (articleId) break;
     }
 
-    // Segundo intento: buscar en todo el HTML cuál bloque contiene el radicado
+    // Si no coincidió en contexto cercano, buscar el token en todo el HTML y tomar el articleId más cercano
     if (!articleId) {
-      for (const token of buscarEn) {
+      for (const token of tokensEnBusq) {
         if (!token) continue;
         const idxToken = htmlBusq.indexOf(token);
         if (idxToken > -1) {
-          // Buscar el articleId más cercano a este token
-          const ventana = htmlBusq.substring(Math.max(0, idxToken - 1000), idxToken + 1000);
+          const ventana = htmlBusq.substring(Math.max(0, idxToken - 1500), idxToken + 1500);
           const mLocal = /articleId[=\s:"']+(\d{6,12})/i.exec(ventana);
           if (mLocal) {
             articleId = mLocal[1];
-            console.log(`[micrositio] articleId=${articleId} encontrado cerca de token="${token}"`);
+            console.log(`[micrositio] articleId=${articleId} por proximidad al token="${token}"`);
             break;
           }
         }
       }
     }
 
-    // ── PASO 4: recorrer cada articleId buscando el que contiene el radicado en su detalle ──
-    // El HTML de búsqueda NO incluye el radicado — hay que entrar al detalle de cada uno
-    // El portal muestra el proceso como "AAAA00NNN" — año + consecutivo (pos 16-20)
-    // Ejemplo: radicado 11001400302820230068200 → "202300682" en el detalle
-    const consecSinCeros = String(parseInt(consecRad, 10)); // "00682" → "682"
-    const tokensRad = [
-      r,                              // radicado completo 23 dígitos
-      anioRad + consecRad,            // "202300682"
-      anioRad + consecSinCeros,       // "2023682"
-      anioRad + "0" + consecSinCeros, // "20230682"
-    ];
-    let htmlDetalle = "";
-    articleId = null;
-
-    // Pedir todos los detalles EN PARALELO para no acumular timeouts
-    const idsARevisar = articleIds.slice(0, 5);
-    console.log(`[micrositio] GET detalles en paralelo: ${idsARevisar.join(", ")}`);
-    const detalles = await Promise.all(idsARevisar.map(async (aid) => {
-      const dUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp&${P}_articleId=${aid}`;
-      try {
-        const dResp = await axios.get(dUrl, {
-          headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
-          timeout: 20000, maxRedirects: 5, validateStatus: () => true,
-        });
-        const htmlD = dResp.data || "";
-        // Log del número de proceso visible en el detalle
-        const idxRad = htmlD.search(/\d{8,23}/);
-        if (idxRad > -1) console.log(`[micrositio] detalle ${aid}: "${htmlD.substring(idxRad, idxRad+23).trim()}"`);
-        return { aid, htmlD };
-      } catch(e) {
-        console.log(`[micrositio] detalle ${aid} error: ${e.message}`);
-        return { aid, htmlD: "" };
-      }
-    }));
-
-    // Buscar el que coincide con el radicado
-    for (const { aid, htmlD } of detalles) {
-      const coincide = tokensRad.some(t => t && htmlD.includes(t));
-      if (coincide) {
-        articleId = aid;
-        htmlDetalle = htmlD;
-        console.log(`[micrositio] articleId=${aid} COINCIDE con radicado`);
-        break;
-      } else {
-        console.log(`[micrositio] articleId=${aid} no coincide (tokens: ${tokensRad.join("|")})`);
-      }
-    }
-
     if (!articleId) {
-      console.log(`[micrositio] Ningún articleId coincidió. Tokens: ${tokensRad.join(", ")}`);
+      console.log(`[micrositio] No se encontró el proceso. Tokens buscados: ${tokensEnBusq.join(", ")}`);
+      // Log de muestra del HTML para diagnóstico
+      console.log(`[micrositio] HTML búsqueda muestra [0-800]: ${htmlBusq.substring(0, 800)}`);
       return null;
     }
+
+    let htmlDetalle = "";
 
     // ── PASO 5: extraer uuid del PDF ──
     let uuid = null, groupId = GROUP_ID;
