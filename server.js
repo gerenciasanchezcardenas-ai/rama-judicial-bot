@@ -307,12 +307,20 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
 
     if (!articleId) {
       console.log(`[micrositio] No se encontró el proceso. Tokens buscados: ${tokensEnBusq.join(", ")}`);
-      // Log de muestra del HTML para diagnóstico
-      console.log(`[micrositio] HTML búsqueda muestra [0-800]: ${htmlBusq.substring(0, 800)}`);
+      // Log del HTML completo para diagnóstico (primeros 2000 chars)
+      console.log(`[micrositio] HTML búsqueda [0-2000]: ${htmlBusq.substring(0, 2000)}`);
       return null;
     }
 
-    let htmlDetalle = "";
+    // ── PASO 4: GET detalle del articleId encontrado ──
+    console.log(`[micrositio] articleId=${articleId} — obteniendo detalle`);
+    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_action=verPublicacion&${P}_articleId=${articleId}`;
+    const detalleResp = await axios.get(detalleUrl, {
+      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
+      timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+    });
+    const htmlDetalle = detalleResp.data || "";
+    console.log(`[micrositio] detalle status=${detalleResp.status} bytes=${htmlDetalle.length}`);
 
     // ── PASO 5: extraer uuid del PDF ──
     let uuid = null, groupId = GROUP_ID;
@@ -321,13 +329,14 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       /get_file\?uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
       /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
     ];
+    // Buscar uuid también en el HTML de búsqueda (a veces está en el link del card)
     for (const pat of uuidPatterns) {
-      const mu = pat.exec(htmlDetalle);
+      const mu = pat.exec(htmlDetalle) || pat.exec(htmlBusq);
       if (mu) { uuid = mu[1]; if (mu[2]) groupId = mu[2]; break; }
     }
 
     if (!uuid) {
-      console.log(`[micrositio] uuid no encontrado. Detalle[0-600]: ${htmlDetalle.substring(0, 600)}`);
+      console.log(`[micrositio] uuid no encontrado. Detalle[0-800]: ${htmlDetalle.substring(0, 800)}`);
       return null;
     }
 
