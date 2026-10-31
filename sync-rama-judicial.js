@@ -116,6 +116,54 @@ async function enviarCorreoNovedades(novedades) {
   }
 }
 
+async function enviarCorreoSinNovedades(stats) {
+  if (!RESEND_API_KEY) return;
+  try {
+    const fecha = new Date().toLocaleDateString("es-CO", { timeZone: "America/Bogota", dateStyle: "full" });
+    const hora  = new Date().toLocaleTimeString("es-CO", { timeZone: "America/Bogota", hour: "2-digit", minute: "2-digit" });
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;">
+        <div style="background:#1a1a2e;padding:20px;text-align:center;">
+          <h2 style="color:#c9a84c;margin:0;">SÁNCHEZ & CÁRDENAS</h2>
+          <p style="color:#fff;margin:5px 0 0;">Monitor Judicial — Resumen de sincronización</p>
+        </div>
+        <div style="padding:20px;">
+          <p style="color:#333;">La sincronización del <strong>${fecha}</strong> a las <strong>${hora}</strong> completó sin novedades nuevas.</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px;">
+            <tr style="background:#f5f5f5;"><td style="padding:8px;font-weight:bold;">Procesos revisados</td><td style="padding:8px;">${stats.total}</td></tr>
+            <tr><td style="padding:8px;font-weight:bold;">Sin novedad</td><td style="padding:8px;">${stats.sinNovedad}</td></tr>
+            <tr style="background:#f5f5f5;"><td style="padding:8px;font-weight:bold;">Errores</td><td style="padding:8px;">${stats.errores}</td></tr>
+          </table>
+          <p style="margin-top:20px;">
+            <a href="https://monitor.sanchezcardenasconsulting.com"
+               style="background:#c9a84c;color:#fff;padding:10px 20px;text-decoration:none;border-radius:4px;">
+              Ver portal de monitoreo
+            </a>
+          </p>
+        </div>
+        <div style="background:#f5f5f5;padding:15px;text-align:center;font-size:12px;color:#666;">
+          Sánchez & Cárdenas Consulting S.A.S. · Bogotá, Colombia
+        </div>
+      </div>`;
+
+    await axios.post("https://api.resend.com/emails", {
+      from: "Monitor Judicial <onboarding@resend.dev>",
+      to: [CORREO_DESTINO],
+      subject: `✅ Sin novedades — Sincronización ${hora} · ${fecha}`,
+      html,
+    }, {
+      headers: {
+        "Authorization": `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    });
+    console.log(`[✉] Correo de resumen (sin novedades) enviado a ${CORREO_DESTINO}`);
+  } catch (err) {
+    console.error("[enviarCorreoSinNovedades]", err.message);
+  }
+}
+
 // ── PAUSA entre llamadas ──────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -629,11 +677,11 @@ async function sincronizar() {
   console.log(`       Errores                          : ${errores}`);
   console.log("=".repeat(60));
 
-  // Enviar correo si hay novedades
+  // Enviar correo siempre — con novedades o resumen de sincronización
   if (novedadesParaCorreo.length > 0) {
     await enviarCorreoNovedades(novedadesParaCorreo);
   } else {
-    console.log("[✉] Sin novedades — no se envía correo");
+    await enviarCorreoSinNovedades({ total: nuevasRama + sinNovedad + errores, sinNovedad, errores });
   }
 }
 
