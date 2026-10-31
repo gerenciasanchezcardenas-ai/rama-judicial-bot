@@ -500,8 +500,9 @@ async function insertarActuacionMicrositio(radicadoId, pub) {
     ? pub.fechaPub.substring(0, 10)
     : new Date().toISOString().substring(0, 10);
 
-  const docNombres = pub.documentos.map(d => d.nombre).join("; ");
-  const descripcion = `${pub.tituloPub} — Documentos: ${docNombres}`;
+  // Guardar URLs junto con nombres para que el portal pueda renderizar links
+  const docParts = pub.documentos.map(d => d.url ? `${d.nombre}||${d.url}` : d.nombre).join("; ");
+  const descripcion = `${pub.tituloPub} — Documentos: ${docParts}`;
 
   const { error } = await supabase.from("actuaciones").insert({
     radicado_id: radicadoId,
