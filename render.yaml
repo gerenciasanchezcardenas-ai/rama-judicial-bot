@@ -2,7 +2,7 @@ services:
   - type: web
     name: rama-judicial-bot
     env: node
-    buildCommand: npm install && npx puppeteer browsers install chrome
+    buildCommand: npm install && npx puppeteer browsers install chrome && ls /opt/render/.cache/puppeteer/chrome/ || echo "CHROME NO INSTALADO"
     startCommand: node server.js
     envVars:
       - key: PUPPETEER_CACHE_DIR
