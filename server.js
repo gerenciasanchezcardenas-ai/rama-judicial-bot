@@ -207,49 +207,35 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       headers: HEADERS, timeout: 25000, maxRedirects: 5, validateStatus: () => true,
     });
     const cookieStr = (homeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
-    console.log(`[micrositio] home status=${homeResp.status} cookies: ${cookieStr.substring(0, 80)}`);
+    console.log(`[micrositio] cookies: ${cookieStr.substring(0, 80)}`);
 
-    // ── PASO 2: GET publicaciones con action=filterStructures ──
-    // Flujo real capturado del browser:
-    //   - idStructure=6098973 → categoría "Fijaciones" (incluye "Fijación de Estado")
-    //   - idStructure=6098965 → "Notificaciones por Estados" (alternativa)
-    //   - idDepto=" " (espacio), no el código del depto
-    //   - idDespacho=12 dígitos
-    // Se intenta primero con Fijaciones y si no hay resultados, con Notificaciones por Estados
-    const ESTRUCTURAS = [
-      { id: "6098973", nombre: "Fijaciones" },
-      { id: "6098965", nombre: "Notificaciones por Estados" },
-    ];
+    // ── PASO 2: GET búsqueda con los filtros correctos (URL confirmada por Network capture) ──
+    // action=busqueda con idDepto, idMuni, idEntidad, idEspecialidad, idDespacho, fechaInicio, fechaFin
+    const params = new URLSearchParams({
+      "p_p_id": PORTLET,
+      "p_p_lifecycle": "0",
+      "p_p_state": "normal",
+      "p_p_mode": "view",
+      [`${P}_action`]: "busqueda",
+      [`${P}_fechaInicio`]: fmt(fInicio),
+      [`${P}_fechaFin`]: fmt(fFin),
+      [`${P}_idDepto`]: idDepto,
+      [`${P}_idMuni`]: idMuni,
+      [`${P}_idEntidad`]: idEntidad,
+      [`${P}_idEspecialidad`]: idEspecialidad,
+      [`${P}_idDespacho`]: idDespacho,
+      [`${P}_verTotales`]: "false",
+    });
 
-    let htmlBusq = "";
-    let busqUrl = "";
-    for (const est of ESTRUCTURAS) {
-      const params = new URLSearchParams({
-        "p_p_id": PORTLET,
-        "p_p_lifecycle": "0",
-        "p_p_state": "normal",
-        "p_p_mode": "view",
-        [`${P}_idStructure`]: est.id,
-        [`${P}_action`]: "filterStructures",
-        [`${P}_fechaInicio`]: fmt(fInicio),
-        [`${P}_fechaFin`]: fmt(fFin),
-        [`${P}_idDepto`]: " ",
-        [`${P}_idDespacho`]: idDespacho,
-        [`${P}_verTotales`]: "false",
-        [`${P}_cur`]: "1",
-      });
-      busqUrl = `${BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
-      console.log(`[micrositio] GET filterStructures(${est.nombre}): ${busqUrl.substring(0, 220)}`);
-      const busqResp = await axios.get(busqUrl, {
-        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
-        timeout: 30000, maxRedirects: 5, validateStatus: () => true,
-      });
-      htmlBusq = busqResp.data || "";
-      console.log(`[micrositio] filterStructures(${est.nombre}) status=${busqResp.status} bytes=${htmlBusq.length}`);
-      console.log(`[micrositio] HTML[0-800]: ${htmlBusq.substring(0, 800)}`);
-      if (htmlBusq.includes("articleId") || htmlBusq.includes("VER DETALLE") || htmlBusq.includes("ver-detalle")) break;
-      console.log(`[micrositio] sin resultados en ${est.nombre}, probando siguiente categoría...`);
-    }
+    const busqUrl = `${BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
+    console.log(`[micrositio] GET búsqueda: ${busqUrl.substring(0, 200)}`);
+
+    const busqResp = await axios.get(busqUrl, {
+      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
+      timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+    });
+    const htmlBusq = busqResp.data || "";
+    console.log(`[micrositio] búsqueda status=${busqResp.status} bytes=${htmlBusq.length}`);
 
     // ── PASO 3: en los resultados, buscar el link del estado que corresponde al radicado ──
     // El HTML tiene cards de publicaciones con links "VER DETALLE" que contienen articleId
@@ -264,7 +250,10 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
     if (articleIds.length === 0) {
-      console.log(`[micrositio] Sin articleIds. HTML completo[0-3000]: ${htmlBusq.substring(0, 3000)}`);
+      // Si no hay resultados directos, buscar la categoría "Notificaciones por Estados" y filtrar
+      // El portal muestra categorías — si hay Fijaciones o Notificaciones por Estados, buscar dentro
+      const tieneResultados = htmlBusq.includes("articleId") || htmlBusq.includes("VER DETALLE") || htmlBusq.includes("ver-detalle");
+      console.log(`[micrositio] tieneResultados=${tieneResultados}. HTML[0-600]: ${htmlBusq.substring(0, 600)}`);
       return null;
     }
 
