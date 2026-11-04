@@ -287,88 +287,37 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       req.continue();
     });
 
-    // ── PASO 1: Navegar al micrositio ──
-    console.log(`[micrositio] Navegando al micrositio...`);
-    await page.goto(`${BASE}/web/publicaciones-procesales/inicio`, {
-      waitUntil: "domcontentloaded", timeout: 90000
-    });
-    // Esperar a que los selects se inicialicen (el portal es lento)
-    console.log(`[micrositio] Esperando que los selects inicialicen...`);
-    for (let i = 0; i < 20; i++) {
-      await new Promise(res => setTimeout(res, 2000));
-      const count = await page.evaluate(() => {
-        const sel = document.getElementById('departamento') || document.querySelector('select');
-        return sel ? sel.options.length : -1;
-      });
-      console.log(`[micrositio] poll ${i+1}: select departamento tiene ${count} opciones`);
-      if (count > 1) break;
-    }
-
-    // Helper para seleccionar valor en un select con jQuery/native
-    const selectFiltro = async (selectId, value, label) => {
-      await new Promise(res => setTimeout(res, 2000));
-      const res = await page.evaluate((selId, val) => {
-        const sel = document.getElementById(selId);
-        if (!sel) return `no #${selId}`;
-        const opt = Array.from(sel.options).find(o => o.value.trim() === val || o.value.trim() === " " + val);
-        if (!opt) return `val="${val}" no encontrado en #${selId} (${sel.options.length} opts)`;
-        const realVal = opt.value;
-        if (typeof jQuery !== 'undefined') {
-          jQuery('#' + selId).val(realVal).trigger('change');
-          return `ok-jq #${selId}="${realVal}"`;
-        }
-        sel.value = realVal;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        return `ok-native #${selId}="${realVal}"`;
-      }, selectId, value);
-      console.log(`[micrositio] ${label}: ${res}`);
-      return res.startsWith('ok');
-    };
-
-    // ── PASO 2: Cascade de filtros ──
-    await selectFiltro('departamento', idDepto, `Departamento=${idDepto}`);
-    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue municipios
-    await selectFiltro('municipio', idMuni, `Municipio=${idMuni}`);
-    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue entidades
-    await selectFiltro('entidad', idEntidad, `Entidad=${idEntidad}`);
-    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue especialidades
-    // Especialidad viene del radicado (pos 7-8): "03" = Civil Municipal
-    await selectFiltro('especialidad', idEspecialidad, `Especialidad=${idEspecialidad}`);
-    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue despachos
-    await selectFiltro('despacho', idDespacho, `Despacho=${idDespacho}`);
-    await new Promise(res => setTimeout(res, 2000));
-
-    // ── PASO 3: Poner fechas (últimos 60 días) ──
-    const fechaInicio = fmt(fInicio);
+    // ── PASO 1-4: Navegar DIRECTAMENTE a la URL de búsqueda con parámetros GET ──
+    // El portal genera una URL con todos los filtros al hacer BUSCAR — usamos eso directamente,
+    // evitando el llenado de formulario en cascada que es frágil y lento.
+    const P2 = `_${PORTLET}`;
+    const fechaInicio = "2024-05-14"; // desde inicio del portal (14 mayo 2024)
     const fechaFin    = fmt(fFin);
-    await page.evaluate((fi, ff) => {
-      const inputs = document.querySelectorAll('input[type="date"]');
-      if (inputs[0]) { inputs[0].value = fi; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
-      if (inputs[1]) { inputs[1].value = ff; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
-      return `${inputs.length} inputs → ${fi} a ${ff}`;
-    }, fechaInicio, fechaFin);
-    console.log(`[micrositio] Fechas: ${fechaInicio} → ${fechaFin}`);
+    const searchUrl = `${BASE}/web/publicaciones-procesales/inicio` +
+      `?p_p_id=${PORTLET}` +
+      `&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view` +
+      `&${P2}_action=busqueda` +
+      `&${P2}_fechaInicio=${fechaInicio}` +
+      `&${P2}_fechaFin=${fechaFin}` +
+      `&${P2}_idDepto=${idDepto}` +
+      `&${P2}_idMuni=${idMuni}` +
+      `&${P2}_idEntidad=${idEntidad}` +
+      `&${P2}_idEspecialidad=${idEspecialidad}` +
+      `&${P2}_idDespacho=${idDespacho}` +
+      `&${P2}_verTotales=true`;
 
-    // ── PASO 4: Clic BUSCAR — el portal usa AJAX, no navegación de página ──
-    console.log(`[micrositio] Haciendo clic en BUSCAR...`);
-    await page.evaluate(() => {
-      const btn = document.getElementById('buscar') ||
-                  document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
-      if (btn) btn.click();
-    });
-    // El portal carga resultados vía AJAX — esperar que aparezca el contenido de resultados
-    console.log(`[micrositio] Esperando resultados AJAX (el portal es lento)...`);
-    // Intentar esperar un elemento típico de resultados; si no aparece en 20s, continuar igual
+    console.log(`[micrositio] URL búsqueda directa: ${searchUrl}`);
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    console.log(`[micrositio] Página de resultados cargada, esperando contenido...`);
+    // Esperar a que aparezcan links de artículos (o timeout tras 20s)
     try {
-      await page.waitForFunction(() => {
-        // Buscar cualquier link con articleId en el DOM (indica que cargaron resultados)
-        const links = document.querySelectorAll('a[href*="articleId"]');
-        return links.length > 0;
-      }, { timeout: 20000 });
-      console.log(`[micrositio] Resultados AJAX detectados`);
+      await page.waitForFunction(
+        () => document.querySelectorAll('a[href*="articleId"]').length > 0,
+        { timeout: 20000 }
+      );
+      console.log(`[micrositio] Links articleId detectados en la página`);
     } catch(e) {
-      console.log(`[micrositio] waitForFunction timeout, continuando con lo que haya`);
-      await new Promise(res => setTimeout(res, 5000));
+      console.log(`[micrositio] Sin links articleId en 20s, continuando con lo disponible`);
     }
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
