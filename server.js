@@ -1005,4 +1005,127 @@ app.get("/debug-micrositio/:idReg", async (req, res) => {
   }
 });
 
+// Diagnóstico Puppeteer: ejecuta el flujo paso a paso y retorna un reporte JSON
+// GET /debug-puppeteer/11001400302820230068200
+app.get("/debug-puppeteer/:radicado", async (req, res) => {
+  const radicado = (req.params.radicado || "").replace(/\s/g, "");
+  const reporte = { radicado, pasos: [], error: null };
+  let browser2;
+  try {
+    const puppeteer = require("puppeteer");
+    const fs2 = require("fs");
+    const { execSync } = require("child_process");
+    let puppeteerExec; try { puppeteerExec = puppeteer.executablePath(); } catch(_) {}
+    let sysExec; try { sysExec = execSync("which chromium-browser || which chromium || which google-chrome", { encoding: "utf8" }).trim().split("\n")[0]; } catch(_) {}
+    const candidates = [puppeteerExec, sysExec, "/usr/bin/chromium-browser", "/usr/bin/chromium"].filter(Boolean);
+    const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
+    reporte.executablePath = foundExec || "default";
+
+    browser2 = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+      executablePath: foundExec || undefined,
+    });
+    const pg = await browser2.newPage();
+    await pg.setViewport({ width: 1280, height: 900 });
+    await pg.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    // PASO 1: Navegar
+    reporte.pasos.push({ paso: "navegar", inicio: Date.now() });
+    await pg.goto("https://publicacionesprocesales.ramajudicial.gov.co/web/publicaciones-procesales/inicio", {
+      waitUntil: "domcontentloaded", timeout: 90000
+    });
+    reporte.pasos[reporte.pasos.length-1].fin = Date.now();
+    reporte.pasos[reporte.pasos.length-1].url = pg.url();
+
+    // PASO 2: Esperar selects
+    let optCount = -1;
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      optCount = await pg.evaluate(() => { const s = document.getElementById('departamento') || document.querySelector('select'); return s ? s.options.length : -1; });
+      if (optCount > 1) break;
+    }
+    // Listar todos los selects con sus IDs y opciones
+    const selectsInfo = await pg.evaluate(() => {
+      return Array.from(document.querySelectorAll('select')).map(s => ({
+        id: s.id, name: s.name, optCount: s.options.length,
+        primerasOpts: Array.from(s.options).slice(0, 4).map(o => ({ val: o.value.trim(), txt: o.text.trim() }))
+      }));
+    });
+    reporte.pasos.push({ paso: "selects_info", selectsInfo, departamentoOpts: optCount });
+
+    // PASO 3: Intentar seleccionar departamento y ver qué pasa
+    const r = radicado;
+    const idDepto = r.substring(0, 2);
+    const idMuni  = r.substring(2, 5);
+    const idEnt   = r.substring(5, 7);
+    const idEsp   = r.substring(7, 9);
+    const idNum   = r.substring(9, 12);
+    const idDesp  = idDepto + idMuni + idEnt + idEsp + idNum;
+    reporte.filtros = { idDepto, idMuni, idEnt, idEsp, idNum, idDesp };
+
+    const probarSelect = async (selectId, value) => {
+      await new Promise(r => setTimeout(r, 1500));
+      return pg.evaluate((selId, val) => {
+        const sel = document.getElementById(selId);
+        if (!sel) return { ok: false, msg: `no existe #${selId}` };
+        const opts = Array.from(sel.options).map(o => o.value.trim());
+        const encontrado = opts.find(v => v === val || v === " " + val);
+        if (!encontrado) return { ok: false, msg: `"${val}" no en #${selId}`, optsDisponibles: opts.slice(0, 8) };
+        if (typeof jQuery !== 'undefined') {
+          jQuery('#' + selId).val(encontrado).trigger('change');
+          return { ok: true, msg: `jQuery ok #${selId}="${encontrado}"` };
+        }
+        sel.value = encontrado;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, msg: `native ok #${selId}="${encontrado}"` };
+      }, selectId, value);
+    };
+
+    reporte.pasos.push({ paso: "select_departamento", resultado: await probarSelect('departamento', idDepto) });
+    await new Promise(r => setTimeout(r, 3000));
+    reporte.pasos.push({ paso: "select_municipio", resultado: await probarSelect('municipio', idMuni) });
+    await new Promise(r => setTimeout(r, 3000));
+    reporte.pasos.push({ paso: "select_entidad", resultado: await probarSelect('entidad', idEnt) });
+    await new Promise(r => setTimeout(r, 3000));
+    reporte.pasos.push({ paso: "select_especialidad", resultado: await probarSelect('especialidad', idEsp) });
+    await new Promise(r => setTimeout(r, 3000));
+    reporte.pasos.push({ paso: "select_despacho", resultado: await probarSelect('despacho', idDesp) });
+    await new Promise(r => setTimeout(r, 2000));
+
+    // PASO 4: Buscar el botón BUSCAR
+    const btnInfo = await pg.evaluate(() => {
+      const btn = document.getElementById('buscar') || document.querySelector('button[type="submit"], input[type="submit"]');
+      return btn ? { id: btn.id, type: btn.type, text: btn.textContent?.trim(), tagName: btn.tagName } : null;
+    });
+    reporte.pasos.push({ paso: "boton_buscar", btnInfo });
+
+    if (btnInfo) {
+      await pg.evaluate(() => {
+        const btn = document.getElementById('buscar') || document.querySelector('button[type="submit"], input[type="submit"]');
+        if (btn) btn.click();
+      });
+      await new Promise(r => setTimeout(r, 15000));
+      const htmlRes = await pg.evaluate(() => document.body.innerHTML);
+      const articleIds = [];
+      const re = /articleId[=\s:"']+(\d{6,12})/gi;
+      let m;
+      while ((m = re.exec(htmlRes)) !== null) if (!articleIds.includes(m[1])) articleIds.push(m[1]);
+      reporte.pasos.push({
+        paso: "resultados",
+        articleIds,
+        htmlSnippet: htmlRes.substring(0, 1000),
+        textoVisible: (await pg.evaluate(() => document.body.innerText)).substring(0, 500)
+      });
+    }
+
+    await browser2.close();
+    res.json(reporte);
+  } catch(e) {
+    if (browser2) try { await browser2.close(); } catch(_) {}
+    reporte.error = e.message;
+    res.status(500).json(reporte);
+  }
+});
+
 app.listen(PORT, () => console.log(`✅ Servidor activo en http://localhost:${PORT}`));
