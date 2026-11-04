@@ -349,19 +349,26 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     }, fechaInicio, fechaFin);
     console.log(`[micrositio] Fechas: ${fechaInicio} → ${fechaFin}`);
 
-    // ── PASO 4: Clic BUSCAR ──
+    // ── PASO 4: Clic BUSCAR — esperar navegación ──
     console.log(`[micrositio] Haciendo clic en BUSCAR...`);
-    await page.evaluate(() => {
-      const btn = document.getElementById('buscar') ||
-                  document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
-      if (btn) btn.click();
-    });
-    // El portal es lento — esperar resultados
+    try {
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
+        page.evaluate(() => {
+          const btn = document.getElementById('buscar') ||
+                      document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
+          if (btn) btn.click();
+        }),
+      ]);
+    } catch(navErr) {
+      console.log(`[micrositio] waitForNavigation tras BUSCAR: ${navErr.message}`);
+    }
+    // Espera adicional para que el portal cargue resultados (es lento)
     console.log(`[micrositio] Esperando resultados (el portal es lento)...`);
-    await new Promise(res => setTimeout(res, 12000));
+    await new Promise(res => setTimeout(res, 8000));
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
-    const htmlBusq = await page.evaluate(() => document.body.innerHTML);
+    const htmlBusq = await page.content();
     const reArt = /articleId[=\s:"']+(\d{6,12})/gi;
     let ma;
     const articleIds = [];
