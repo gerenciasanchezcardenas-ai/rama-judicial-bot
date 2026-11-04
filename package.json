@@ -4,7 +4,7 @@
   "description": "Bot WhatsApp + Sincronización Rama Judicial — Sánchez & Cárdenas Consulting",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node -e \"const{execSync}=require('child_process'),fs=require('fs');try{const p=require('puppeteer');const e=p.executablePath();if(!fs.existsSync(e)){console.log('Chrome no existe, instalando...');execSync('npx puppeteer browsers install chrome',{stdio:'inherit'});}else{console.log('Chrome ok:',e);}}catch(err){console.log('Instalando Chrome...');execSync('npx puppeteer browsers install chrome',{stdio:'inherit'});}\" && node server.js",
     "sync": "node sync-rama-judicial.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
