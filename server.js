@@ -155,8 +155,8 @@ async function enviarPorCorreo(destinatario, asunto, cuerpo, adjunto) {
 }
 
 // Obtiene el documento PDF del micrositio de publicaciones procesales
-// usando HTTP puro (axios) — sin Puppeteer ni Chrome.
-// Flujo: POST búsqueda → extraer articleId del radicado → GET detalle → extraer uuid → descargar PDF
+// usando Puppeteer (browser headless) para evitar el bloqueo 403 que el portal aplica a servidores.
+// Flujo: Puppeteer abre el micrositio → cascade de filtros → BUSCAR → captura articleId → descarga PDF
 // Retorna { tipo, data, ext } o null si falla.
 async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActuacion) {
   const BASE = "https://publicacionesprocesales.ramajudicial.gov.co";
@@ -182,107 +182,143 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     "Connection": "keep-alive",
   };
 
+  // Portal bloquea requests axios con 403. Usar Puppeteer (browser headless) para evitarlo.
+  let browser;
   try {
     const r = (radicado || "").replace(/\s/g, "");
     if (r.length < 20) { console.error("[micrositio] radicado inválido:", radicado); return null; }
 
     // Extraer componentes del radicado (23 dígitos)
-    // 11  001  40  03  028  2023  00068  200
-    // dep mun  ent esp  num  año  consec inst
-    const idDepto       = r.substring(0, 2);          // "11"
-    const idMuni        = r.substring(0, 5);          // "11001"
-    const idEntidad     = r.substring(5, 7);          // "40"
-    const idEspecialidad = r.substring(7, 9);         // "03"
-    const idDespacho    = r.substring(0, 12);         // "110014003028"
+    const idDepto        = r.substring(0, 2);   // "11"
+    const idMuni         = r.substring(0, 5);   // "11001"
+    const idEntidad      = r.substring(5, 7);   // "40"
+    const idEspecialidad = r.substring(7, 9);   // "03"
+    const idDespacho     = r.substring(0, 12);  // "110014003028"
+    const anioRad        = r.substring(12, 16); // "2023"
+    const consecRad      = r.substring(16, 21); // "00068"
+    const consecInt      = String(parseInt(consecRad, 10)); // "68"
 
-    // Rango fijo: últimos 60 días hasta hoy
-    // La actuación "Fijación de Estado" siempre es reciente, así que esto cubre todos los casos
     const fFin    = new Date();
     const fInicio = new Date(); fInicio.setDate(fInicio.getDate() - 60);
     const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
     console.log(`[micrositio] radicado=${r} despacho=${idDespacho} rango=${fmt(fInicio)}→${fmt(fFin)}`);
 
-    // ── PASO 1: GET sesión para obtener cookies ──
-    const homeResp = await axios.get(`${BASE}/web/publicaciones-procesales/inicio`, {
-      headers: HEADERS, timeout: 25000, maxRedirects: 5, validateStatus: () => true,
-    });
-    // Cookie mutable para poder actualizar durante el cascade
-    let cookieStr = (homeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
-    console.log(`[micrositio] cookies: ${cookieStr.substring(0, 80)}`);
+    // ── Lanzar Puppeteer ──
+    const puppeteer = require("puppeteer");
+    const fs2 = require("fs");
+    const { execSync } = require("child_process");
+    let puppeteerExec;
+    try { puppeteerExec = puppeteer.executablePath(); } catch(_) { puppeteerExec = null; }
+    let sysExec;
+    try { sysExec = execSync("which chromium-browser || which chromium || which google-chrome || which google-chrome-stable", { encoding: "utf8" }).trim().split("\n")[0]; } catch(_) { sysExec = null; }
+    const candidates = [puppeteerExec, sysExec, "/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome", "/opt/google/chrome/chrome"].filter(Boolean);
+    const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
+    console.log(`[micrositio] Puppeteer exec: ${foundExec || "default"}`);
 
-    // ── PASO 1b: Cascade lifecycle=2 — simula la selección de filtros en cascada ──
-    // El portal Liferay requiere activar cada filtro vía p_p_lifecycle=2 para que la sesión
-    // quede configurada y el BUSCAR final devuelva artículos (no solo chips de categoría).
-    // Confirmado por captura de red del browser al usar el micrositio manualmente.
-    const cascadeSteps = [
-      { tipoFiltro: "departamento", idFiltro: idDepto,     id: "undefined" },
-      { tipoFiltro: "municipio",    idFiltro: idMuni,       id: "undefined" },
-      { tipoFiltro: "entidad",      idFiltro: idEntidad,    id: "undefined" },
-      { tipoFiltro: "despacho",     idFiltro: idDespacho,   id: "undefined" },
-    ];
-    for (const step of cascadeSteps) {
-      const cascadeParams = new URLSearchParams({
-        "p_p_id": PORTLET,
-        "p_p_lifecycle": "2",
-        "p_p_state": "normal",
-        "p_p_mode": "view",
-        "p_p_cacheability": "cacheLevelPage?",
-        [`${P}_tipoFiltro`]: step.tipoFiltro,
-        [`${P}_idFiltro`]:   step.idFiltro,
-        [`${P}_id`]:         step.id,
-      });
-      const cascadeUrl = `${BASE}/web/publicaciones-procesales/inicio?${cascadeParams.toString()}`;
-      console.log(`[micrositio] cascade ${step.tipoFiltro}=${step.idFiltro}`);
-      const cascadeResp = await axios.get(cascadeUrl, {
-        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
-        timeout: 30000, maxRedirects: 5, validateStatus: () => true,
-      });
-      // Actualizar cookies si el servidor las renueva
-      const newCookies = (cascadeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]);
-      if (newCookies.length > 0) {
-        const existing = cookieStr.split("; ").reduce((m, c) => { const [k] = c.split("="); m[k] = c; return m; }, {});
-        newCookies.forEach(c => { const [k] = c.split("="); existing[k] = c; });
-        cookieStr = Object.values(existing).join("; ");
+    const launchOpts = {
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+    };
+    if (foundExec) launchOpts.executablePath = foundExec;
+
+    browser = await puppeteer.launch(launchOpts);
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    // Interceptar requests para capturar PDF cuando aparezca
+    let pdfUrlCapturada = null;
+    let articleIdCapturado = null;
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const url = req.url();
+      if (url.includes('get_file') && url.includes('uuid=')) {
+        pdfUrlCapturada = url;
+        console.log(`[micrositio] PDF URL interceptada: ${url}`);
       }
-      console.log(`[micrositio] cascade ${step.tipoFiltro} status=${cascadeResp.status} bytes=${String(cascadeResp.data||"").length}`);
-      // El portal es lento — pequeña pausa entre steps
-      await new Promise(r => setTimeout(r, 1500));
+      if (url.includes('articleId=')) {
+        const m = /articleId=(\d{6,12})/.exec(url);
+        if (m) articleIdCapturado = m[1];
+      }
+      req.continue();
+    });
+
+    // ── PASO 1: Navegar al micrositio ──
+    console.log(`[micrositio] Navegando al micrositio...`);
+    await page.goto(`${BASE}/web/publicaciones-procesales/inicio`, {
+      waitUntil: "domcontentloaded", timeout: 90000
+    });
+    // Esperar a que los selects se inicialicen (el portal es lento)
+    console.log(`[micrositio] Esperando que los selects inicialicen...`);
+    for (let i = 0; i < 20; i++) {
+      await new Promise(res => setTimeout(res, 2000));
+      const count = await page.evaluate(() => {
+        const sel = document.getElementById('departamento') || document.querySelector('select');
+        return sel ? sel.options.length : -1;
+      });
+      console.log(`[micrositio] poll ${i+1}: select departamento tiene ${count} opciones`);
+      if (count > 1) break;
     }
 
-    // ── PASO 2: GET búsqueda con los filtros correctos (URL confirmada por Network capture) ──
-    // Después del cascade, action=busqueda devuelve artículos (no solo chips de categoría).
-    // verTotales=true para que devuelva todos los artículos del despacho en el rango de fechas.
-    const params = new URLSearchParams({
-      "p_p_id": PORTLET,
-      "p_p_lifecycle": "0",
-      "p_p_state": "normal",
-      "p_p_mode": "view",
-      [`${P}_action`]: "busqueda",
-      [`${P}_fechaInicio`]: fmt(fInicio),
-      [`${P}_fechaFin`]: fmt(fFin),
-      [`${P}_idDepto`]: idDepto,
-      [`${P}_idMuni`]: idMuni,
-      [`${P}_idEntidad`]: idEntidad,
-      [`${P}_idEspecialidad`]: idEspecialidad,
-      [`${P}_idDespacho`]: idDespacho,
-      [`${P}_verTotales`]: "true",
+    // Helper para seleccionar valor en un select con jQuery/native
+    const selectFiltro = async (selectId, value, label) => {
+      await new Promise(res => setTimeout(res, 2000));
+      const res = await page.evaluate((selId, val) => {
+        const sel = document.getElementById(selId);
+        if (!sel) return `no #${selId}`;
+        const opt = Array.from(sel.options).find(o => o.value.trim() === val || o.value.trim() === " " + val);
+        if (!opt) return `val="${val}" no encontrado en #${selId} (${sel.options.length} opts)`;
+        const realVal = opt.value;
+        if (typeof jQuery !== 'undefined') {
+          jQuery('#' + selId).val(realVal).trigger('change');
+          return `ok-jq #${selId}="${realVal}"`;
+        }
+        sel.value = realVal;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return `ok-native #${selId}="${realVal}"`;
+      }, selectId, value);
+      console.log(`[micrositio] ${label}: ${res}`);
+      return res.startsWith('ok');
+    };
+
+    // ── PASO 2: Cascade de filtros ──
+    await selectFiltro('departamento', idDepto, `Departamento=${idDepto}`);
+    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue municipios
+    await selectFiltro('municipio', idMuni, `Municipio=${idMuni}`);
+    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue entidades
+    await selectFiltro('entidad', idEntidad, `Entidad=${idEntidad}`);
+    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue especialidades
+    // Especialidad viene del radicado (pos 7-8): "03" = Civil Municipal
+    await selectFiltro('especialidad', idEspecialidad, `Especialidad=${idEspecialidad}`);
+    await new Promise(res => setTimeout(res, 3000)); // esperar que cargue despachos
+    await selectFiltro('despacho', idDespacho, `Despacho=${idDespacho}`);
+    await new Promise(res => setTimeout(res, 2000));
+
+    // ── PASO 3: Poner fechas (últimos 60 días) ──
+    const fechaInicio = fmt(fInicio);
+    const fechaFin    = fmt(fFin);
+    await page.evaluate((fi, ff) => {
+      const inputs = document.querySelectorAll('input[type="date"]');
+      if (inputs[0]) { inputs[0].value = fi; inputs[0].dispatchEvent(new Event('change', { bubbles: true })); }
+      if (inputs[1]) { inputs[1].value = ff; inputs[1].dispatchEvent(new Event('change', { bubbles: true })); }
+      return `${inputs.length} inputs → ${fi} a ${ff}`;
+    }, fechaInicio, fechaFin);
+    console.log(`[micrositio] Fechas: ${fechaInicio} → ${fechaFin}`);
+
+    // ── PASO 4: Clic BUSCAR ──
+    console.log(`[micrositio] Haciendo clic en BUSCAR...`);
+    await page.evaluate(() => {
+      const btn = document.getElementById('buscar') ||
+                  document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
+      if (btn) btn.click();
     });
+    // El portal es lento — esperar resultados
+    console.log(`[micrositio] Esperando resultados (el portal es lento)...`);
+    await new Promise(res => setTimeout(res, 12000));
 
-    const busqUrl = `${BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
-    console.log(`[micrositio] GET búsqueda: ${busqUrl.substring(0, 200)}`);
-
-    const busqResp = await axios.get(busqUrl, {
-      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
-      timeout: 30000, maxRedirects: 5, validateStatus: () => true,
-    });
-    let htmlBusq = busqResp.data || "";
-    console.log(`[micrositio] búsqueda status=${busqResp.status} bytes=${htmlBusq.length}`);
-
-    // ── PASO 3: en los resultados, buscar el link del estado que corresponde al radicado ──
-    // El HTML tiene cards de publicaciones con links "VER DETALLE" que contienen articleId
-    // También puede tener el número de radicado visible en el texto
-    // Extraer todos los articleId presentes
+    // ── PASO 5: Extraer articleIds del HTML de resultados ──
+    const htmlBusq = await page.evaluate(() => document.body.innerHTML);
     const reArt = /articleId[=\s:"']+(\d{6,12})/gi;
     let ma;
     const articleIds = [];
@@ -291,123 +327,120 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     }
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
-    if (articleIds.length === 0) {
-      // El cascade lifecycle=2 debería haber establecido la sesión para que BUSCAR devuelva artículos.
-      // Si llegamos aquí es porque el portal no devolvió resultados (sin publicaciones en ese rango,
-      // o el portal está caído/lento). Loguear el HTML para diagnóstico.
-      console.log(`[micrositio] Sin articleIds tras cascade+busqueda — HTML[0-1000]: ${htmlBusq.substring(0, 1000)}`);
-      return null;
-    }
-
-    // ── PASO 3: identificar el articleId del proceso en el HTML de resultados ──
-    // El portal muestra el consecutivo como AAAA+NNN (sin ceros) junto al link de cada publicación
-    // Ejemplo: radicado 11001310304420260045000 → "202600450" en el HTML de búsqueda
-    const anioRad       = r.substring(12, 16);                        // "2026"
-    const consecRad     = r.substring(16, 21);                        // "00045"
-    const consecInt     = String(parseInt(consecRad, 10));             // "45"
-    // Variantes que puede mostrar el portal: con y sin ceros intermedios
+    // Tokens para identificar el radicado correcto entre varios resultados
     const tokensEnBusq = [
-      r,                                   // radicado completo
-      anioRad + consecRad,                 // "202600045"
-      anioRad + "0" + consecInt,           // "20260045" — un cero
-      anioRad + "00" + consecInt,          // "202600045" — dos ceros
-      anioRad + consecInt,                 // "202645"
+      r,
+      anioRad + consecRad,
+      anioRad + "0" + consecInt,
+      anioRad + "00" + consecInt,
+      anioRad + consecInt,
     ];
 
-    let articleId = null;
-    // Buscar en el contexto de cada articleId dentro del HTML de búsqueda
-    for (const aid of articleIds) {
-      const idx = htmlBusq.indexOf(`articleId=${aid}`);
-      if (idx === -1) continue;
-      const contexto = htmlBusq.substring(Math.max(0, idx - 800), idx + 800);
-      for (const token of tokensEnBusq) {
-        if (token && contexto.includes(token)) {
-          articleId = aid;
-          console.log(`[micrositio] articleId=${aid} coincide en búsqueda por token="${token}"`);
-          break;
-        }
-      }
-      if (articleId) break;
-    }
+    let articleId = articleIdCapturado || null;
 
-    // Si no coincidió en contexto cercano, buscar el token en todo el HTML y tomar el articleId más cercano
     if (!articleId) {
-      for (const token of tokensEnBusq) {
-        if (!token) continue;
-        const idxToken = htmlBusq.indexOf(token);
-        if (idxToken > -1) {
-          const ventana = htmlBusq.substring(Math.max(0, idxToken - 1500), idxToken + 1500);
-          const mLocal = /articleId[=\s:"']+(\d{6,12})/i.exec(ventana);
-          if (mLocal) {
-            articleId = mLocal[1];
-            console.log(`[micrositio] articleId=${articleId} por proximidad al token="${token}"`);
+      for (const aid of articleIds) {
+        const idx = htmlBusq.indexOf(`articleId=${aid}`);
+        if (idx === -1) continue;
+        const contexto = htmlBusq.substring(Math.max(0, idx - 800), idx + 800);
+        for (const token of tokensEnBusq) {
+          if (token && contexto.includes(token)) {
+            articleId = aid;
+            console.log(`[micrositio] articleId=${aid} por token="${token}"`);
             break;
           }
         }
+        if (articleId) break;
       }
     }
 
+    // Si hay un único resultado, tomarlo directamente
+    if (!articleId && articleIds.length === 1) {
+      articleId = articleIds[0];
+      console.log(`[micrositio] Un solo articleId=${articleId}, usando directamente`);
+    }
+
     if (!articleId) {
-      console.log(`[micrositio] No se encontró el proceso. Tokens buscados: ${tokensEnBusq.join(", ")}`);
-      // Log del HTML completo para diagnóstico (primeros 2000 chars)
-      console.log(`[micrositio] HTML búsqueda [0-2000]: ${htmlBusq.substring(0, 2000)}`);
+      console.log(`[micrositio] Sin articleId. HTML[0-1500]: ${htmlBusq.substring(0, 1500)}`);
+      await browser.close();
       return null;
     }
 
-    // ── PASO 4: GET detalle del articleId encontrado ──
-    console.log(`[micrositio] articleId=${articleId} — obteniendo detalle`);
-    const detalleUrl = `${BASE}/web/publicaciones-procesales/inicio?p_p_id=${PORTLET}&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view&${P}_action=verPublicacion&${P}_articleId=${articleId}`;
-    const detalleResp = await axios.get(detalleUrl, {
-      headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
-      timeout: 30000, maxRedirects: 5, validateStatus: () => true,
-    });
-    const htmlDetalle = detalleResp.data || "";
-    console.log(`[micrositio] detalle status=${detalleResp.status} bytes=${htmlDetalle.length}`);
+    // ── PASO 6: Clic en "Ver detalle" del artículo ──
+    console.log(`[micrositio] Abriendo detalle articleId=${articleId}...`);
+    const clickedDetail = await page.evaluate((aid) => {
+      const links = Array.from(document.querySelectorAll(`a[href*="articleId=${aid}"], a[href*="articleId%3D${aid}"]`));
+      if (links.length > 0) { links[0].click(); return `clic en link articleId=${aid}`; }
+      // Buscar por texto del botón "Ver"
+      const allLinks = Array.from(document.querySelectorAll('a'));
+      const verLink = allLinks.find(a => a.href && a.href.includes(aid));
+      if (verLink) { verLink.click(); return `clic en link que contiene ${aid}`; }
+      return 'no encontrado';
+    }, articleId);
+    console.log(`[micrositio] Detalle: ${clickedDetail}`);
 
-    // ── PASO 5: extraer uuid del PDF ──
-    let uuid = null, groupId = GROUP_ID;
+    if (clickedDetail !== 'no encontrado') {
+      await new Promise(res => setTimeout(res, 8000));
+    }
+
+    // ── PASO 7: Extraer UUID del PDF del HTML de detalle ──
+    const htmlDetalle = await page.evaluate(() => document.body.innerHTML);
     const uuidPatterns = [
       /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})&groupId=(\d+)/i,
       /get_file\?uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
       /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
     ];
-    // Buscar uuid también en el HTML de búsqueda (a veces está en el link del card)
+    let uuid = null, groupId = GROUP_ID;
     for (const pat of uuidPatterns) {
       const mu = pat.exec(htmlDetalle) || pat.exec(htmlBusq);
       if (mu) { uuid = mu[1]; if (mu[2]) groupId = mu[2]; break; }
     }
 
+    if (!uuid && pdfUrlCapturada) {
+      // Extraer UUID de la URL interceptada
+      const mu = /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(pdfUrlCapturada);
+      if (mu) { uuid = mu[1]; }
+      const mg = /groupId=(\d+)/.exec(pdfUrlCapturada);
+      if (mg) groupId = mg[1];
+    }
+
     if (!uuid) {
-      console.log(`[micrositio] uuid no encontrado. Detalle[0-800]: ${htmlDetalle.substring(0, 800)}`);
+      console.log(`[micrositio] UUID no encontrado. Detalle[0-800]: ${htmlDetalle.substring(0, 800)}`);
+      await browser.close();
       return null;
     }
 
+    // ── PASO 8: Descargar PDF usando cookies de Puppeteer ──
     const pdfUrl = `${BASE}/c/document_library/get_file?uuid=${uuid}&groupId=${groupId}`;
-    console.log(`[micrositio] PDF URL: ${pdfUrl}`);
+    console.log(`[micrositio] Descargando PDF: ${pdfUrl}`);
 
-    // ── PASO 6: descargar PDF ──
-    const pdfResp = await axios.get(pdfUrl, {
-      headers: { ...HEADERS, "Cookie": cookieStr },
-      responseType: "arraybuffer", timeout: 40000, validateStatus: () => true,
+    // Obtener cookies de la sesión de Puppeteer para usarlas en la descarga
+    const cookies = await page.cookies();
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      page.goto(pdfUrl, { waitUntil: 'networkidle2', timeout: 60000 })
+        .then(() => page.evaluate(() => {
+          // Si el PDF se abrió en el browser, extraer el contenido via fetch
+          return fetch(window.location.href).then(r => r.arrayBuffer()).then(ab => Array.from(new Uint8Array(ab)));
+        }))
+        .then(arr => resolve(Buffer.from(arr)))
+        .catch(reject);
     });
 
-    if (pdfResp.status !== 200) {
-      console.log(`[micrositio] descarga PDF status=${pdfResp.status}`);
-      return null;
-    }
-
-    const pdfBuffer = Buffer.from(pdfResp.data);
+    await browser.close();
     console.log(`[micrositio] PDF OK bytes=${pdfBuffer.length}`);
 
     if (pdfBuffer.length < 500) {
-      console.log(`[micrositio] respuesta muy pequeña: ${pdfBuffer.toString("utf8", 0, 200)}`);
+      console.log(`[micrositio] Respuesta muy pequeña`);
       return null;
     }
 
     return { tipo: "pdf", data: pdfBuffer, ext: "pdf" };
 
   } catch (e) {
-    console.error(`[micrositio] Error general:`, e.message, e.response?.status);
+    if (browser) try { await browser.close(); } catch(_) {}
+    console.error(`[micrositio] Error general:`, e.message);
     return null;
   }
 }
