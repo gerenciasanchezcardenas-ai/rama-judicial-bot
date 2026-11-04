@@ -321,21 +321,23 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     console.log(`[micrositio] URL búsqueda directa: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 120000 });
     console.log(`[micrositio] Página de resultados cargada, esperando contenido...`);
-    // Esperar a que aparezcan links de artículos — hasta 30s porque el portal carga via JS/AJAX
+    // Esperar a que aparezcan links de resultados (texto tipo "2023-NNNNN") — hasta 30s
     try {
       await page.waitForFunction(
-        () => document.querySelectorAll('a[href*="articleId"]').length > 0,
+        () => Array.from(document.querySelectorAll('a[href]')).some(a => /^\d{4}-\d+/.test((a.textContent || '').trim())),
         { timeout: 30000 }
       );
-      const nLinks = await page.evaluate(() => document.querySelectorAll('a[href*="articleId"]').length);
-      console.log(`[micrositio] Links articleId detectados: ${nLinks}`);
+      const nLinks = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('a[href]')).filter(a => /^\d{4}-\d+/.test((a.textContent||'').trim())).length
+      );
+      console.log(`[micrositio] Links de resultados detectados: ${nLinks}`);
     } catch(e) {
       // Log del HTML del portlet para diagnóstico
       const htmlSnip = await page.evaluate(() => {
         const p = document.querySelector('[id*="PublicacionesEfectosProcesalesPortlet"]') || document.querySelector('.portlet-body') || document.body;
         return p.innerHTML.substring(0, 2000);
       });
-      console.log(`[micrositio] Sin links articleId en 30s. HTML portlet[0-2000]: ${htmlSnip}`);
+      console.log(`[micrositio] Sin resultados en 30s. HTML portlet[0-2000]: ${htmlSnip}`);
     }
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
@@ -368,82 +370,41 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const numProceso5 = `${anioRad}-${consecRad5}`; // "2023-00682" si consecInt=68
     console.log(`[micrositio] Buscando proceso: "${numProcesoKey}" | "${numProcesoAlt}" | "${numProceso5}" | consecInt="${consecInt}"`);
 
-    // Buscar el link con articleId cuyo texto contenga el número de proceso
-    const resultadoEncontrado = await page.evaluate((key, keyAlt, key5, cInt) => {
-      const links = Array.from(document.querySelectorAll('a[href*="articleId"]'));
-      // Buscar link cuyo texto contenga el número de proceso (cualquier variante)
-      const match = links.find(a => {
+    // ── PASO 5: Buscar el link directo al PDF del proceso ──
+    // La lista muestra links directos con nombre: "2023-00682 AutoAcepta...pdf"
+    // Buscamos el link cuyo texto empiece con el número de proceso
+    const resultadoEncontrado = await page.evaluate((key) => {
+      // Buscar CUALQUIER link cuyo texto comience con el número de proceso
+      const todos = Array.from(document.querySelectorAll('a[href]'));
+      const match = todos.find(a => {
         const txt = (a.textContent || '').trim();
-        const href = (a.href || '');
-        return txt.includes(key) || txt.includes(keyAlt) || txt.includes(key5) || href.includes(key);
+        return txt.startsWith(key);
       });
       if (match) {
-        const m = /articleId[=\s:"']+(\d{6,12})/i.exec(match.href);
-        return { href: match.href, articleId: m ? m[1] : null, txt: match.textContent.trim().substring(0,100) };
+        return { href: match.href, txt: match.textContent.trim().substring(0, 120) };
       }
-      // Diagnóstico: listar todos los links con articleId encontrados
+      // Diagnóstico: listar los primeros links que parezcan resultados (texto con año-número)
+      const candidatos = todos.filter(a => /^\d{4}-\d+/.test((a.textContent || '').trim()));
       return {
         noEncontrado: true,
         key,
-        linksArticle: links.slice(0,10).map(a => ({
-          txt: a.textContent.trim().substring(0,80),
-          href: a.href.substring(0,200)
+        candidatos: candidatos.slice(0, 15).map(a => ({
+          txt: a.textContent.trim().substring(0, 100),
+          href: a.href.substring(0, 200)
         }))
       };
-    }, numProcesoKey, numProcesoAlt, numProceso5, consecInt);
+    }, numProcesoKey);
 
     console.log(`[micrositio] Resultado búsqueda:`, JSON.stringify(resultadoEncontrado));
 
     if (!resultadoEncontrado || resultadoEncontrado.noEncontrado) {
-      console.log(`[micrositio] No se encontró el proceso ${numProcesoKey} en la lista de resultados`);
+      console.log(`[micrositio] No se encontró "${numProcesoKey}" en la lista`);
       await browser.close();
       return null;
     }
 
-    const articleIdSeleccionado = resultadoEncontrado.articleId || articleIdCapturado;
-    if (!articleIdSeleccionado) {
-      console.log(`[micrositio] articleId no extraído del link: ${resultadoEncontrado.href}`);
-      await browser.close();
-      return null;
-    }
-
-    // ── PASO 6: Navegar al detalle usando el href exacto del link encontrado ──
-    // (el link ya tiene todos los parámetros necesarios: nomDepto, nomMuni, etc.)
-    const detailUrl = resultadoEncontrado.href;
-    console.log(`[micrositio] Navegando a detalle articleId=${articleIdSeleccionado}: ${detailUrl}`);
-
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
-      page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    ]);
-
-    await new Promise(res => setTimeout(res, 3000));
-
-    // ── PASO 7: Encontrar el link al PDF en la página de detalle ──
-    const pdfUrl = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a[href]'));
-      // Buscar link directo a PDF
-      const pdfLink = links.find(a => {
-        const h = (a.href || '').toLowerCase();
-        return h.includes('.pdf') || h.includes('get_file') || h.includes('document_library');
-      });
-      if (pdfLink) return pdfLink.href;
-      // Listar todos los links para diagnóstico
-      return { noEncontrado: true, links: links.slice(0,15).map(a => ({ txt: a.textContent.trim().substring(0,60), href: a.href.substring(0,200) })) };
-    });
-
-    if (!pdfUrl || typeof pdfUrl === 'object') {
-      // Si no encontró link PDF pero sí tenemos URL interceptada, usarla
-      if (pdfUrlCapturada) {
-        console.log(`[micrositio] Usando PDF URL interceptada: ${pdfUrlCapturada}`);
-      } else {
-        console.log(`[micrositio] PDF no encontrado en detalle:`, JSON.stringify(pdfUrl));
-        await browser.close();
-        return null;
-      }
-    }
-
-    const urlFinalPdf = (typeof pdfUrl === 'string') ? pdfUrl : pdfUrlCapturada;
+    // El link puede ir directo al PDF o a una página de detalle
+    const urlFinalPdf = resultadoEncontrado.href;
     console.log(`[micrositio] Descargando PDF: ${urlFinalPdf}`);
 
     // Usar page.evaluate + fetch para descargar el PDF con las cookies de sesión activas
