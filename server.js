@@ -319,17 +319,23 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       `&${P2}_verTotales=true`;
 
     console.log(`[micrositio] URL búsqueda directa: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+    await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 120000 });
     console.log(`[micrositio] Página de resultados cargada, esperando contenido...`);
-    // Esperar a que aparezcan links de artículos (o timeout tras 20s)
+    // Esperar a que aparezcan links de artículos — hasta 30s porque el portal carga via JS/AJAX
     try {
       await page.waitForFunction(
         () => document.querySelectorAll('a[href*="articleId"]').length > 0,
-        { timeout: 20000 }
+        { timeout: 30000 }
       );
-      console.log(`[micrositio] Links articleId detectados en la página`);
+      const nLinks = await page.evaluate(() => document.querySelectorAll('a[href*="articleId"]').length);
+      console.log(`[micrositio] Links articleId detectados: ${nLinks}`);
     } catch(e) {
-      console.log(`[micrositio] Sin links articleId en 20s, continuando con lo disponible`);
+      // Log del HTML del portlet para diagnóstico
+      const htmlSnip = await page.evaluate(() => {
+        const p = document.querySelector('[id*="PublicacionesEfectosProcesalesPortlet"]') || document.querySelector('.portlet-body') || document.body;
+        return p.innerHTML.substring(0, 2000);
+      });
+      console.log(`[micrositio] Sin links articleId en 30s. HTML portlet[0-2000]: ${htmlSnip}`);
     }
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
@@ -355,18 +361,21 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     // El texto del link contiene el número de proceso: "2023-00068" (año-consecutivo con ceros)
     // Para radicado 11001400302820230068200: anioRad="2023" consecRad="00068" → buscar "2023-00068"
     const numProcesoKey = `${anioRad}-${consecRad}`; // "2023-00068"
-    // Variantes del número de proceso por si el portal usa otro formato
+    // Variantes del número de proceso por si el portal usa otro formato de padding
     const numProcesoAlt = `${anioRad}-${consecInt}`; // "2023-68" (sin ceros)
-    console.log(`[micrositio] Buscando resultado con número de proceso: ${numProcesoKey} o ${numProcesoAlt}`);
+    // El portal a veces muestra "2023-00682" (5 dígitos con cero extra) — probamos ambos
+    const consecRad5 = consecRad.substring(0,4) + consecInt.padStart(1,'0'); // variante 5 dígitos
+    const numProceso5 = `${anioRad}-${consecRad5}`; // "2023-00682" si consecInt=68
+    console.log(`[micrositio] Buscando proceso: "${numProcesoKey}" | "${numProcesoAlt}" | "${numProceso5}" | consecInt="${consecInt}"`);
 
     // Buscar el link con articleId cuyo texto contenga el número de proceso
-    const resultadoEncontrado = await page.evaluate((key, keyAlt) => {
+    const resultadoEncontrado = await page.evaluate((key, keyAlt, key5, cInt) => {
       const links = Array.from(document.querySelectorAll('a[href*="articleId"]'));
-      // Buscar link cuyo texto contenga el número de proceso
+      // Buscar link cuyo texto contenga el número de proceso (cualquier variante)
       const match = links.find(a => {
         const txt = (a.textContent || '').trim();
         const href = (a.href || '');
-        return txt.includes(key) || txt.includes(keyAlt) || href.includes(key);
+        return txt.includes(key) || txt.includes(keyAlt) || txt.includes(key5) || href.includes(key);
       });
       if (match) {
         const m = /articleId[=\s:"']+(\d{6,12})/i.exec(match.href);
@@ -381,7 +390,7 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
           href: a.href.substring(0,200)
         }))
       };
-    }, numProcesoKey, numProcesoAlt);
+    }, numProcesoKey, numProcesoAlt, numProceso5, consecInt);
 
     console.log(`[micrositio] Resultado búsqueda:`, JSON.stringify(resultadoEncontrado));
 
@@ -391,19 +400,16 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       return null;
     }
 
-    const articleIdSeleccionado = resultadoEncontrado.articleId || (articleIdCapturado);
+    const articleIdSeleccionado = resultadoEncontrado.articleId || articleIdCapturado;
     if (!articleIdSeleccionado) {
       console.log(`[micrositio] articleId no extraído del link: ${resultadoEncontrado.href}`);
       await browser.close();
       return null;
     }
 
-    // ── PASO 6: Navegar a la página de detalle del articleId ──
-    const detailUrl = `${BASE}/web/publicaciones-procesales/inicio` +
-      `?p_p_id=${PORTLET}` +
-      `&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view` +
-      `&_${PORTLET}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp` +
-      `&_${PORTLET}_articleId=${articleIdSeleccionado}`;
+    // ── PASO 6: Navegar al detalle usando el href exacto del link encontrado ──
+    // (el link ya tiene todos los parámetros necesarios: nomDepto, nomMuni, etc.)
+    const detailUrl = resultadoEncontrado.href;
     console.log(`[micrositio] Navegando a detalle articleId=${articleIdSeleccionado}: ${detailUrl}`);
 
     await Promise.all([
