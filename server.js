@@ -188,12 +188,15 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const r = (radicado || "").replace(/\s/g, "");
     if (r.length < 20) { console.error("[micrositio] radicado inválido:", radicado); return null; }
 
-    // Extraer componentes del radicado (23 dígitos)
+    // Extraer componentes del radicado (23 dígitos) — igual que parsearRadicado()
+    // 11  001  40  03  028  2023  00068  200
+    // dep mun  tip esp  num  año  consec  inst
     const idDepto        = r.substring(0, 2);   // "11"
-    const idMuni         = r.substring(0, 5);   // "11001"
+    const idMuni         = r.substring(2, 5);   // "001"  ← solo 3 chars (sin dep)
     const idEntidad      = r.substring(5, 7);   // "40"
     const idEspecialidad = r.substring(7, 9);   // "03"
-    const idDespacho     = r.substring(0, 12);  // "110014003028"
+    const idNum          = r.substring(9, 12);  // "028"
+    const idDespacho     = idDepto + idMuni + idEntidad + idEspecialidad + idNum; // "110014003028"
     const anioRad        = r.substring(12, 16); // "2023"
     const consecRad      = r.substring(16, 21); // "00068"
     const consecInt      = String(parseInt(consecRad, 10)); // "68"
@@ -410,29 +413,35 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       return null;
     }
 
-    // ── PASO 8: Descargar PDF usando cookies de Puppeteer ──
+    // ── PASO 8: Descargar PDF usando cookies de la sesión Puppeteer ──
     const pdfUrl = `${BASE}/c/document_library/get_file?uuid=${uuid}&groupId=${groupId}`;
     console.log(`[micrositio] Descargando PDF: ${pdfUrl}`);
 
-    // Obtener cookies de la sesión de Puppeteer para usarlas en la descarga
-    const cookies = await page.cookies();
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-    const pdfBuffer = await new Promise((resolve, reject) => {
-      page.goto(pdfUrl, { waitUntil: 'networkidle2', timeout: 60000 })
-        .then(() => page.evaluate(() => {
-          // Si el PDF se abrió en el browser, extraer el contenido via fetch
-          return fetch(window.location.href).then(r => r.arrayBuffer()).then(ab => Array.from(new Uint8Array(ab)));
-        }))
-        .then(arr => resolve(Buffer.from(arr)))
-        .catch(reject);
-    });
+    // Usar page.evaluate + fetch para descargar el PDF con las cookies de sesión activas
+    // (no se puede usar axios porque el portal bloquea con 403 desde el servidor)
+    const pdfArr = await page.evaluate(async (url) => {
+      try {
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) return { error: `HTTP ${resp.status}` };
+        const ab = await resp.arrayBuffer();
+        return { data: Array.from(new Uint8Array(ab)) };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }, pdfUrl);
 
     await browser.close();
+
+    if (pdfArr.error) {
+      console.log(`[micrositio] Error descargando PDF: ${pdfArr.error}`);
+      return null;
+    }
+
+    const pdfBuffer = Buffer.from(pdfArr.data);
     console.log(`[micrositio] PDF OK bytes=${pdfBuffer.length}`);
 
     if (pdfBuffer.length < 500) {
-      console.log(`[micrositio] Respuesta muy pequeña`);
+      console.log(`[micrositio] Respuesta muy pequeña (posible HTML de error)`);
       return null;
     }
 
