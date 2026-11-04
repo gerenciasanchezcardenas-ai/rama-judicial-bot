@@ -211,13 +211,53 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const puppeteer = require("puppeteer");
     const fs2 = require("fs");
     const { execSync } = require("child_process");
-    let puppeteerExec;
-    try { puppeteerExec = puppeteer.executablePath(); } catch(_) { puppeteerExec = null; }
-    let sysExec;
-    try { sysExec = execSync("which chromium-browser || which chromium || which google-chrome || which google-chrome-stable", { encoding: "utf8" }).trim().split("\n")[0]; } catch(_) { sysExec = null; }
-    const candidates = [puppeteerExec, sysExec, "/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome", "/opt/google/chrome/chrome"].filter(Boolean);
-    const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
-    console.log(`[micrositio] Puppeteer exec: ${foundExec || "default"}`);
+
+    // Buscar Chrome instalado por puppeteer en rutas conocidas de Render
+    const cacheDir = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
+    let foundExec = null;
+
+    // 1. Intentar puppeteer.executablePath() — funciona si PUPPETEER_CACHE_DIR está bien
+    try {
+      const ep = puppeteer.executablePath();
+      if (ep && fs2.existsSync(ep)) { foundExec = ep; console.log(`[micrositio] Chrome vía executablePath: ${ep}`); }
+      else console.log(`[micrositio] executablePath()=${ep} pero no existe`);
+    } catch(e) { console.log(`[micrositio] executablePath() error: ${e.message}`); }
+
+    // 2. Buscar glob en el cacheDir
+    if (!foundExec) {
+      try {
+        const hits = execSync(`find ${cacheDir} -name "chrome" -o -name "chromium" -o -name "chrome-linux" 2>/dev/null | head -5`, { encoding: "utf8" }).trim();
+        console.log(`[micrositio] find chrome en ${cacheDir}: ${hits || "nada"}`);
+        const lines = hits.split("\n").filter(Boolean);
+        for (const line of lines) {
+          if (fs2.existsSync(line) && !line.endsWith(".json")) {
+            // Verificar que es ejecutable
+            try { execSync(`test -x "${line}"`); foundExec = line; break; } catch(_) {}
+          }
+        }
+        if (!foundExec && lines.length > 0) {
+          // Buscar ejecutable dentro del directorio encontrado
+          for (const line of lines) {
+            const dir = line.endsWith("/chrome") || line.endsWith("/chromium") ? require("path").dirname(line) : line;
+            const exec2 = execSync(`find "${dir}" -maxdepth 2 -type f -name "chrome" -o -name "chromium" 2>/dev/null | head -3`, { encoding: "utf8" }).trim();
+            const execs = exec2.split("\n").filter(Boolean);
+            for (const e2 of execs) { try { execSync(`test -x "${e2}"`); foundExec = e2; break; } catch(_) {} }
+            if (foundExec) break;
+          }
+        }
+      } catch(e) { console.log(`[micrositio] find error: ${e.message}`); }
+    }
+
+    // 3. Si no se encontró, instalar ahora mismo
+    if (!foundExec) {
+      console.log(`[micrositio] Chrome no encontrado, instalando en tiempo de ejecución...`);
+      try {
+        execSync(`npx puppeteer browsers install chrome`, { encoding: "utf8", stdio: "inherit", env: { ...process.env, PUPPETEER_CACHE_DIR: cacheDir } });
+        try { const ep = puppeteer.executablePath(); if (ep && fs2.existsSync(ep)) foundExec = ep; } catch(_) {}
+      } catch(e) { console.log(`[micrositio] Error instalando Chrome: ${e.message}`); }
+    }
+
+    console.log(`[micrositio] executablePath final: ${foundExec || "default (puede fallar)"}`);
 
     const launchOpts = {
       headless: true,
@@ -1015,16 +1055,31 @@ app.get("/debug-puppeteer/:radicado", async (req, res) => {
     const puppeteer = require("puppeteer");
     const fs2 = require("fs");
     const { execSync } = require("child_process");
-    let puppeteerExec; try { puppeteerExec = puppeteer.executablePath(); } catch(_) {}
-    let sysExec; try { sysExec = execSync("which chromium-browser || which chromium || which google-chrome", { encoding: "utf8" }).trim().split("\n")[0]; } catch(_) {}
-    const candidates = [puppeteerExec, sysExec, "/usr/bin/chromium-browser", "/usr/bin/chromium"].filter(Boolean);
-    const foundExec = candidates.find(p => { try { return fs2.existsSync(p); } catch(_) { return false; } });
-    reporte.executablePath = foundExec || "default";
+    const cacheDir2 = process.env.PUPPETEER_CACHE_DIR || "/opt/render/.cache/puppeteer";
+    let foundExec2 = null;
+    try { const ep = puppeteer.executablePath(); if (ep && fs2.existsSync(ep)) foundExec2 = ep; } catch(_) {}
+    if (!foundExec2) {
+      try {
+        const hits = execSync(`find ${cacheDir2} -name "chrome" -type f 2>/dev/null | head -3`, { encoding: "utf8" }).trim();
+        reporte.chromeFind = hits || "nada";
+        const lines = hits.split("\n").filter(Boolean);
+        for (const line of lines) { try { execSync(`test -x "${line}"`); foundExec2 = line; break; } catch(_) {} }
+      } catch(e) { reporte.chromeFindError = e.message; }
+    }
+    if (!foundExec2) {
+      try {
+        reporte.instalandoChrome = true;
+        execSync(`npx puppeteer browsers install chrome`, { encoding: "utf8", stdio: "pipe", env: { ...process.env, PUPPETEER_CACHE_DIR: cacheDir2 } });
+        try { const ep = puppeteer.executablePath(); if (ep && fs2.existsSync(ep)) foundExec2 = ep; } catch(_) {}
+      } catch(e) { reporte.chromeInstallError = e.message; }
+    }
+    reporte.executablePath = foundExec2 || "default";
+    reporte.cacheDir = cacheDir2;
 
     browser2 = await puppeteer.launch({
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
-      executablePath: foundExec || undefined,
+      executablePath: foundExec2 || undefined,
     });
     const pg = await browser2.newPage();
     await pg.setViewport({ width: 1280, height: 900 });
