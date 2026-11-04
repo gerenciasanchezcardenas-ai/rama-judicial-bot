@@ -192,11 +192,11 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     // 11  001  40  03  028  2023  00068  200
     // dep mun  tip esp  num  año  consec  inst
     const idDepto        = r.substring(0, 2);   // "11"
-    const idMuni         = r.substring(2, 5);   // "001"  ← solo 3 chars (sin dep)
+    const idMuni         = r.substring(0, 5);   // "11001" ← 5 chars: dep+mun (el select usa código completo)
     const idEntidad      = r.substring(5, 7);   // "40"
     const idEspecialidad = r.substring(7, 9);   // "03"
     const idNum          = r.substring(9, 12);  // "028"
-    const idDespacho     = idDepto + idMuni + idEntidad + idEspecialidad + idNum; // "110014003028"
+    const idDespacho     = idDepto + r.substring(2,5) + idEntidad + idEspecialidad + idNum; // "110014003028"
     const anioRad        = r.substring(12, 16); // "2023"
     const consecRad      = r.substring(16, 21); // "00068"
     const consecInt      = String(parseInt(consecRad, 10)); // "68"
@@ -1112,11 +1112,11 @@ app.get("/debug-puppeteer/:radicado", async (req, res) => {
     // PASO 3: Intentar seleccionar departamento y ver qué pasa
     const r = radicado;
     const idDepto = r.substring(0, 2);
-    const idMuni  = r.substring(2, 5);
+    const idMuni  = r.substring(0, 5);   // "11001" — el select usa dep+mun (5 dígitos)
     const idEnt   = r.substring(5, 7);
     const idEsp   = r.substring(7, 9);
     const idNum   = r.substring(9, 12);
-    const idDesp  = idDepto + idMuni + idEnt + idEsp + idNum;
+    const idDesp  = idDepto + r.substring(2,5) + idEnt + idEsp + idNum; // "110014003028"
     reporte.filtros = { idDepto, idMuni, idEnt, idEsp, idNum, idDesp };
 
     const probarSelect = async (selectId, value) => {
