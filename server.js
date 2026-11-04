@@ -287,41 +287,95 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       req.continue();
     });
 
-    // ── PASO 1-4: Navegar DIRECTAMENTE a la URL de búsqueda con parámetros GET ──
-    // El portal genera una URL con todos los filtros al hacer BUSCAR — usamos eso directamente,
-    // evitando el llenado de formulario en cascada que es frágil y lento.
-    const P2 = `_${PORTLET}`;
-    // Usar fechaActuacion como fecha exacta de búsqueda (±3 días por si acaso)
-    // El portal filtra por fecha de publicación del estado
+    // ── Calcular fechas de búsqueda (±3 días alrededor de fechaActuacion) ──
     let fechaBase = fechaActuacion ? new Date(fechaActuacion) : fFin;
     if (isNaN(fechaBase.getTime())) fechaBase = fFin;
     const fBusqInicio = new Date(fechaBase); fBusqInicio.setDate(fBusqInicio.getDate() - 3);
     const fBusqFin    = new Date(fechaBase); fBusqFin.setDate(fBusqFin.getDate() + 3);
     const fechaInicio = fmt(fBusqInicio);
     const fechaFin    = fmt(fBusqFin);
-    // Número de proceso para identificar el resultado correcto: año+consecutivo sin ceros
-    // radicado 11001400302820230068200 → "202300682" (anioRad + consecInt sin ceros)
-    const numProceso = anioRad + consecInt; // "202368" — pero el portal muestra "202300682"
-    const numProcesoFull = anioRad + consecRad; // "202300068" — con ceros
-    console.log(`[micrositio] Buscando proceso: ${numProceso} / ${numProcesoFull}, fecha: ${fechaInicio}→${fechaFin}`);
+    console.log(`[micrositio] Fechas búsqueda: ${fechaInicio} → ${fechaFin}`);
 
-    const searchUrl = `${BASE}/web/publicaciones-procesales/inicio` +
-      `?p_p_id=${PORTLET}` +
-      `&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view` +
-      `&${P2}_action=busqueda` +
-      `&${P2}_fechaInicio=${fechaInicio}` +
-      `&${P2}_fechaFin=${fechaFin}` +
-      `&${P2}_idDepto=${idDepto}` +
-      `&${P2}_idMuni=${idMuni}` +
-      `&${P2}_idEntidad=${idEntidad}` +
-      `&${P2}_idEspecialidad=${idEspecialidad}` +
-      `&${P2}_idDespacho=${idDespacho}` +
-      `&${P2}_verTotales=true`;
+    // ── PASO 1: Navegar a la página principal del micrositio ──
+    const homeUrl = `${BASE}/web/publicaciones-procesales/inicio`;
+    console.log(`[micrositio] Cargando formulario: ${homeUrl}`);
+    await page.goto(homeUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-    console.log(`[micrositio] URL búsqueda directa: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: "networkidle2", timeout: 120000 });
-    console.log(`[micrositio] Página de resultados cargada, esperando contenido...`);
-    // Esperar a que aparezcan links de resultados (texto tipo "2023-NNNNN") — hasta 30s
+    // Esperar que aparezca el select de departamento
+    await page.waitForSelector('#departamento', { timeout: 20000 });
+    console.log(`[micrositio] Formulario listo`);
+
+    // Helper para setear un <select> nativo y disparar el evento change (que carga el siguiente select via AJAX)
+    const setSelect = async (selector, value, label) => {
+      await page.evaluate((sel, val) => {
+        const el = document.querySelector(sel);
+        if (!el) return;
+        // Setear valor nativo
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+        nativeSetter.call(el, val);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        // También disparar via jQuery si está disponible
+        if (window.jQuery) window.jQuery(el).trigger('change');
+      }, selector, value);
+      console.log(`[micrositio] ${label} = ${value}`);
+      await new Promise(res => setTimeout(res, 2500)); // esperar carga AJAX
+    };
+
+    // ── PASO 2: Seleccionar Departamento (11 = Bogotá) ──
+    await setSelect('#departamento', idDepto, 'departamento');
+
+    // ── PASO 3: Seleccionar Municipio (11001 = Bogotá D.C.) ──
+    await page.waitForSelector(`#municipio option[value="${idMuni}"]`, { timeout: 15000 }).catch(() => {});
+    await setSelect('#municipio', idMuni, 'municipio');
+
+    // ── PASO 4: Seleccionar Entidad (40 = Juzgado Municipal) ──
+    await page.waitForSelector(`#entidad option[value="${idEntidad}"]`, { timeout: 15000 }).catch(() => {});
+    await setSelect('#entidad', idEntidad, 'entidad');
+
+    // ── PASO 5: Seleccionar Especialidad (03 = Civil) ──
+    await page.waitForSelector(`#especialidad option[value="${idEspecialidad}"]`, { timeout: 15000 }).catch(() => {});
+    await setSelect('#especialidad', idEspecialidad, 'especialidad');
+
+    // ── PASO 6: Seleccionar Despacho ──
+    await page.waitForSelector(`#despacho option[value="${idDespacho}"]`, { timeout: 15000 }).catch(() => {});
+    await setSelect('#despacho', idDespacho, 'despacho');
+
+    // ── PASO 7: Poner fechas ──
+    await page.evaluate((fi, ff) => {
+      const setVal = (sel, val) => {
+        const el = document.querySelector(sel);
+        if (!el) return;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      // Intentar varios selectores posibles para las fechas
+      setVal('input[name*="fechaInicio"], input[id*="fechaInicio"], #fechaInicio', fi);
+      setVal('input[name*="fechaFin"], input[id*="fechaFin"], #fechaFin', ff);
+      // Liferay puede usar inputs con name que incluye el portlet prefix
+      document.querySelectorAll('input[type="date"], input[type="text"][id*="fecha"]').forEach(el => {
+        if (el.id && el.id.includes('Inicio')) { const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; s.call(el,fi); el.dispatchEvent(new Event('change',{bubbles:true})); }
+        if (el.id && el.id.includes('Fin'))    { const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; s.call(el,ff); el.dispatchEvent(new Event('change',{bubbles:true})); }
+      });
+    }, fechaInicio, fechaFin);
+    console.log(`[micrositio] Fechas seteadas: ${fechaInicio} → ${fechaFin}`);
+    await new Promise(res => setTimeout(res, 500));
+
+    // ── PASO 8: Hacer clic en BUSCAR y esperar resultados ──
+    console.log(`[micrositio] Haciendo clic en BUSCAR...`);
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {}),
+      page.evaluate(() => {
+        // Buscar el botón de búsqueda por varios selectores
+        const btn = document.querySelector('button[type="submit"], input[type="submit"], button.buscar, #buscar, [id*="buscar"], button[onclick*="buscar"]')
+                 || Array.from(document.querySelectorAll('button, input[type="submit"]')).find(b => /buscar/i.test(b.textContent || b.value || b.id));
+        if (btn) { btn.click(); return 'clic en ' + (btn.id || btn.textContent?.trim()?.substring(0,30)); }
+        return 'boton no encontrado';
+      }).then(r => console.log(`[micrositio] Botón: ${r}`))
+    ]);
+
+    // Esperar a que aparezcan links de resultados (texto tipo "2023-NNNNN")
     try {
       await page.waitForFunction(
         () => Array.from(document.querySelectorAll('a[href]')).some(a => /^\d{4}-\d+/.test((a.textContent || '').trim())),
@@ -330,14 +384,13 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       const nLinks = await page.evaluate(() =>
         Array.from(document.querySelectorAll('a[href]')).filter(a => /^\d{4}-\d+/.test((a.textContent||'').trim())).length
       );
-      console.log(`[micrositio] Links de resultados detectados: ${nLinks}`);
+      console.log(`[micrositio] Resultados detectados: ${nLinks} links`);
     } catch(e) {
-      // Log del HTML del portlet para diagnóstico
       const htmlSnip = await page.evaluate(() => {
         const p = document.querySelector('[id*="PublicacionesEfectosProcesalesPortlet"]') || document.querySelector('.portlet-body') || document.body;
-        return p.innerHTML.substring(0, 2000);
+        return p.innerHTML.substring(0, 3000);
       });
-      console.log(`[micrositio] Sin resultados en 30s. HTML portlet[0-2000]: ${htmlSnip}`);
+      console.log(`[micrositio] Sin resultados tras BUSCAR. HTML[0-3000]: ${htmlSnip}`);
     }
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
