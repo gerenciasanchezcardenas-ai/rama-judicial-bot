@@ -349,26 +349,38 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     }, fechaInicio, fechaFin);
     console.log(`[micrositio] Fechas: ${fechaInicio} → ${fechaFin}`);
 
-    // ── PASO 4: Clic BUSCAR — esperar navegación ──
+    // ── PASO 4: Clic BUSCAR — el portal usa AJAX, no navegación de página ──
     console.log(`[micrositio] Haciendo clic en BUSCAR...`);
+    await page.evaluate(() => {
+      const btn = document.getElementById('buscar') ||
+                  document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
+      if (btn) btn.click();
+    });
+    // El portal carga resultados vía AJAX — esperar que aparezca el contenido de resultados
+    console.log(`[micrositio] Esperando resultados AJAX (el portal es lento)...`);
+    // Intentar esperar un elemento típico de resultados; si no aparece en 20s, continuar igual
     try {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
-        page.evaluate(() => {
-          const btn = document.getElementById('buscar') ||
-                      document.querySelector('button[type="submit"], input[type="submit"], .buscar, [class*="buscar"]');
-          if (btn) btn.click();
-        }),
-      ]);
-    } catch(navErr) {
-      console.log(`[micrositio] waitForNavigation tras BUSCAR: ${navErr.message}`);
+      await page.waitForFunction(() => {
+        // Buscar cualquier link con articleId en el DOM (indica que cargaron resultados)
+        const links = document.querySelectorAll('a[href*="articleId"]');
+        return links.length > 0;
+      }, { timeout: 20000 });
+      console.log(`[micrositio] Resultados AJAX detectados`);
+    } catch(e) {
+      console.log(`[micrositio] waitForFunction timeout, continuando con lo que haya`);
+      await new Promise(res => setTimeout(res, 5000));
     }
-    // Espera adicional para que el portal cargue resultados (es lento)
-    console.log(`[micrositio] Esperando resultados (el portal es lento)...`);
-    await new Promise(res => setTimeout(res, 8000));
 
     // ── PASO 5: Extraer articleIds del HTML de resultados ──
-    const htmlBusq = await page.content();
+    // Leer solo el portlet de resultados para evitar articleIds de la navegación general
+    const htmlBusq = await page.evaluate(() => {
+      // Intentar leer solo el contenedor del portlet de resultados
+      const portlet = document.querySelector('[id*="PublicacionesEfectosProcesalesPortlet"]') ||
+                      document.querySelector('.portlet-body') ||
+                      document.querySelector('#main-content') ||
+                      document.body;
+      return portlet.innerHTML;
+    });
     const reArt = /articleId[=\s:"']+(\d{6,12})/gi;
     let ma;
     const articleIds = [];
