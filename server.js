@@ -234,7 +234,7 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
       timeout: 30000, maxRedirects: 5, validateStatus: () => true,
     });
-    const htmlBusq = busqResp.data || "";
+    let htmlBusq = busqResp.data || "";
     console.log(`[micrositio] búsqueda status=${busqResp.status} bytes=${htmlBusq.length}`);
 
     // ── PASO 3: en los resultados, buscar el link del estado que corresponde al radicado ──
@@ -250,11 +250,41 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
     if (articleIds.length === 0) {
-      // Si no hay resultados directos, buscar la categoría "Notificaciones por Estados" y filtrar
-      // El portal muestra categorías — si hay Fijaciones o Notificaciones por Estados, buscar dentro
-      const tieneResultados = htmlBusq.includes("articleId") || htmlBusq.includes("VER DETALLE") || htmlBusq.includes("ver-detalle");
-      console.log(`[micrositio] tieneResultados=${tieneResultados}. HTML[0-600]: ${htmlBusq.substring(0, 600)}`);
-      return null;
+      // El portal devuelve categorías en el primer paso, no artículos directamente.
+      // Segundo paso: llamar action=filterStructures con idStructure=6098973 (Fijaciones/Estados)
+      console.log(`[micrositio] Sin articleIds en busqueda — intentando filterStructures`);
+      const params2 = new URLSearchParams({
+        "p_p_id": PORTLET,
+        "p_p_lifecycle": "0",
+        "p_p_state": "normal",
+        "p_p_mode": "view",
+        [`${P}_action`]: "filterStructures",
+        [`${P}_idStructure`]: "6098973",
+        [`${P}_fechaInicio`]: fmt(fInicio),
+        [`${P}_fechaFin`]: fmt(fFin),
+        [`${P}_idDepto`]: " ",
+        [`${P}_idDespacho`]: idDespacho,
+        [`${P}_verTotales`]: "true",
+        [`${P}_cur`]: "1",
+      });
+      const filterUrl = `${BASE}/web/publicaciones-procesales/inicio?${params2.toString()}`;
+      console.log(`[micrositio] GET filterStructures: ${filterUrl.substring(0, 200)}`);
+      const filterResp = await axios.get(filterUrl, {
+        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
+        timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+      });
+      const htmlFilter = filterResp.data || "";
+      console.log(`[micrositio] filterStructures status=${filterResp.status} bytes=${htmlFilter.length}`);
+      while ((ma = reArt.exec(htmlFilter)) !== null) {
+        if (!articleIds.includes(ma[1])) articleIds.push(ma[1]);
+      }
+      console.log(`[micrositio] articleIds tras filterStructures: ${articleIds.join(", ") || "ninguno"}`);
+      if (articleIds.length === 0) {
+        console.log(`[micrositio] HTML filterStructures[0-1000]: ${htmlFilter.substring(0, 1000)}`);
+        return null;
+      }
+      // Usar htmlFilter como fuente para el matching de radicado en los pasos siguientes
+      htmlBusq = htmlFilter;
     }
 
     // ── PASO 3: identificar el articleId del proceso en el HTML de resultados ──
