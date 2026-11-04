@@ -350,97 +350,95 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     }
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
-    // Tokens para identificar el radicado correcto entre varios resultados
-    // El portal muestra el número de proceso como "202300682" (año + consec sin ceros iniciales pero con padding propio)
-    // Generamos variantes para cubrir distintos formatos posibles
-    const tokensEnBusq = [
-      r,                              // radicado completo
-      anioRad + consecRad,            // "202300068" (con ceros)
-      anioRad + consecInt,            // "202368"
-      anioRad + "0" + consecInt,      // "2023068"
-      anioRad + "00" + consecInt,     // "20230068"
-      anioRad + "000" + consecInt,    // "202300068"
-      consecRad,                      // "00068"
-      consecInt,                      // "68"
-    ];
+    // ── PASO 5: Encontrar el articleId del proceso en los resultados ──
+    // Los resultados en la lista muestran links con articleId que llevan a la página de detalle.
+    // El texto del link contiene el número de proceso: "2023-00068" (año-consecutivo con ceros)
+    // Para radicado 11001400302820230068200: anioRad="2023" consecRad="00068" → buscar "2023-00068"
+    const numProcesoKey = `${anioRad}-${consecRad}`; // "2023-00068"
+    // Variantes del número de proceso por si el portal usa otro formato
+    const numProcesoAlt = `${anioRad}-${consecInt}`; // "2023-68" (sin ceros)
+    console.log(`[micrositio] Buscando resultado con número de proceso: ${numProcesoKey} o ${numProcesoAlt}`);
 
-    let articleId = articleIdCapturado || null;
+    // Buscar el link con articleId cuyo texto contenga el número de proceso
+    const resultadoEncontrado = await page.evaluate((key, keyAlt) => {
+      const links = Array.from(document.querySelectorAll('a[href*="articleId"]'));
+      // Buscar link cuyo texto contenga el número de proceso
+      const match = links.find(a => {
+        const txt = (a.textContent || '').trim();
+        const href = (a.href || '');
+        return txt.includes(key) || txt.includes(keyAlt) || href.includes(key);
+      });
+      if (match) {
+        const m = /articleId[=\s:"']+(\d{6,12})/i.exec(match.href);
+        return { href: match.href, articleId: m ? m[1] : null, txt: match.textContent.trim().substring(0,100) };
+      }
+      // Diagnóstico: listar todos los links con articleId encontrados
+      return {
+        noEncontrado: true,
+        key,
+        linksArticle: links.slice(0,10).map(a => ({
+          txt: a.textContent.trim().substring(0,80),
+          href: a.href.substring(0,200)
+        }))
+      };
+    }, numProcesoKey, numProcesoAlt);
 
-    if (!articleId) {
-      for (const aid of articleIds) {
-        const idx = htmlBusq.indexOf(`articleId=${aid}`);
-        if (idx === -1) continue;
-        const contexto = htmlBusq.substring(Math.max(0, idx - 800), idx + 800);
-        for (const token of tokensEnBusq) {
-          if (token && contexto.includes(token)) {
-            articleId = aid;
-            console.log(`[micrositio] articleId=${aid} por token="${token}"`);
-            break;
-          }
-        }
-        if (articleId) break;
+    console.log(`[micrositio] Resultado búsqueda:`, JSON.stringify(resultadoEncontrado));
+
+    if (!resultadoEncontrado || resultadoEncontrado.noEncontrado) {
+      console.log(`[micrositio] No se encontró el proceso ${numProcesoKey} en la lista de resultados`);
+      await browser.close();
+      return null;
+    }
+
+    const articleIdSeleccionado = resultadoEncontrado.articleId || (articleIdCapturado);
+    if (!articleIdSeleccionado) {
+      console.log(`[micrositio] articleId no extraído del link: ${resultadoEncontrado.href}`);
+      await browser.close();
+      return null;
+    }
+
+    // ── PASO 6: Navegar a la página de detalle del articleId ──
+    const detailUrl = `${BASE}/web/publicaciones-procesales/inicio` +
+      `?p_p_id=${PORTLET}` +
+      `&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view` +
+      `&_${PORTLET}_jspPage=%2FMETA-INF%2Fresources%2Fdetail.jsp` +
+      `&_${PORTLET}_articleId=${articleIdSeleccionado}`;
+    console.log(`[micrositio] Navegando a detalle articleId=${articleIdSeleccionado}: ${detailUrl}`);
+
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}),
+      page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    ]);
+
+    await new Promise(res => setTimeout(res, 3000));
+
+    // ── PASO 7: Encontrar el link al PDF en la página de detalle ──
+    const pdfUrl = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href]'));
+      // Buscar link directo a PDF
+      const pdfLink = links.find(a => {
+        const h = (a.href || '').toLowerCase();
+        return h.includes('.pdf') || h.includes('get_file') || h.includes('document_library');
+      });
+      if (pdfLink) return pdfLink.href;
+      // Listar todos los links para diagnóstico
+      return { noEncontrado: true, links: links.slice(0,15).map(a => ({ txt: a.textContent.trim().substring(0,60), href: a.href.substring(0,200) })) };
+    });
+
+    if (!pdfUrl || typeof pdfUrl === 'object') {
+      // Si no encontró link PDF pero sí tenemos URL interceptada, usarla
+      if (pdfUrlCapturada) {
+        console.log(`[micrositio] Usando PDF URL interceptada: ${pdfUrlCapturada}`);
+      } else {
+        console.log(`[micrositio] PDF no encontrado en detalle:`, JSON.stringify(pdfUrl));
+        await browser.close();
+        return null;
       }
     }
 
-    // Si hay un único resultado, tomarlo directamente
-    if (!articleId && articleIds.length === 1) {
-      articleId = articleIds[0];
-      console.log(`[micrositio] Un solo articleId=${articleId}, usando directamente`);
-    }
-
-    if (!articleId) {
-      console.log(`[micrositio] Sin articleId. HTML[0-1500]: ${htmlBusq.substring(0, 1500)}`);
-      await browser.close();
-      return null;
-    }
-
-    // ── PASO 6: Clic en "Ver detalle" del artículo ──
-    console.log(`[micrositio] Abriendo detalle articleId=${articleId}...`);
-    const clickedDetail = await page.evaluate((aid) => {
-      const links = Array.from(document.querySelectorAll(`a[href*="articleId=${aid}"], a[href*="articleId%3D${aid}"]`));
-      if (links.length > 0) { links[0].click(); return `clic en link articleId=${aid}`; }
-      // Buscar por texto del botón "Ver"
-      const allLinks = Array.from(document.querySelectorAll('a'));
-      const verLink = allLinks.find(a => a.href && a.href.includes(aid));
-      if (verLink) { verLink.click(); return `clic en link que contiene ${aid}`; }
-      return 'no encontrado';
-    }, articleId);
-    console.log(`[micrositio] Detalle: ${clickedDetail}`);
-
-    if (clickedDetail !== 'no encontrado') {
-      await new Promise(res => setTimeout(res, 8000));
-    }
-
-    // ── PASO 7: Extraer UUID del PDF del HTML de detalle ──
-    const htmlDetalle = await page.evaluate(() => document.body.innerHTML);
-    const uuidPatterns = [
-      /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})&groupId=(\d+)/i,
-      /get_file\?uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-      /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
-    ];
-    let uuid = null, groupId = GROUP_ID;
-    for (const pat of uuidPatterns) {
-      const mu = pat.exec(htmlDetalle) || pat.exec(htmlBusq);
-      if (mu) { uuid = mu[1]; if (mu[2]) groupId = mu[2]; break; }
-    }
-
-    if (!uuid && pdfUrlCapturada) {
-      // Extraer UUID de la URL interceptada
-      const mu = /uuid=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(pdfUrlCapturada);
-      if (mu) { uuid = mu[1]; }
-      const mg = /groupId=(\d+)/.exec(pdfUrlCapturada);
-      if (mg) groupId = mg[1];
-    }
-
-    if (!uuid) {
-      console.log(`[micrositio] UUID no encontrado. Detalle[0-800]: ${htmlDetalle.substring(0, 800)}`);
-      await browser.close();
-      return null;
-    }
-
-    // ── PASO 8: Descargar PDF usando cookies de la sesión Puppeteer ──
-    const pdfUrl = `${BASE}/c/document_library/get_file?uuid=${uuid}&groupId=${groupId}`;
-    console.log(`[micrositio] Descargando PDF: ${pdfUrl}`);
+    const urlFinalPdf = (typeof pdfUrl === 'string') ? pdfUrl : pdfUrlCapturada;
+    console.log(`[micrositio] Descargando PDF: ${urlFinalPdf}`);
 
     // Usar page.evaluate + fetch para descargar el PDF con las cookies de sesión activas
     // (no se puede usar axios porque el portal bloquea con 403 desde el servidor)
@@ -453,7 +451,7 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       } catch (e) {
         return { error: e.message };
       }
-    }, pdfUrl);
+    }, urlFinalPdf);
 
     await browser.close();
 
