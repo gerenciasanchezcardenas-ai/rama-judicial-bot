@@ -291,8 +291,20 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     // El portal genera una URL con todos los filtros al hacer BUSCAR — usamos eso directamente,
     // evitando el llenado de formulario en cascada que es frágil y lento.
     const P2 = `_${PORTLET}`;
-    const fechaInicio = "2024-05-14"; // desde inicio del portal (14 mayo 2024)
-    const fechaFin    = fmt(fFin);
+    // Usar fechaActuacion como fecha exacta de búsqueda (±3 días por si acaso)
+    // El portal filtra por fecha de publicación del estado
+    let fechaBase = fechaActuacion ? new Date(fechaActuacion) : fFin;
+    if (isNaN(fechaBase.getTime())) fechaBase = fFin;
+    const fBusqInicio = new Date(fechaBase); fBusqInicio.setDate(fBusqInicio.getDate() - 3);
+    const fBusqFin    = new Date(fechaBase); fBusqFin.setDate(fBusqFin.getDate() + 3);
+    const fechaInicio = fmt(fBusqInicio);
+    const fechaFin    = fmt(fBusqFin);
+    // Número de proceso para identificar el resultado correcto: año+consecutivo sin ceros
+    // radicado 11001400302820230068200 → "202300682" (anioRad + consecInt sin ceros)
+    const numProceso = anioRad + consecInt; // "202368" — pero el portal muestra "202300682"
+    const numProcesoFull = anioRad + consecRad; // "202300068" — con ceros
+    console.log(`[micrositio] Buscando proceso: ${numProceso} / ${numProcesoFull}, fecha: ${fechaInicio}→${fechaFin}`);
+
     const searchUrl = `${BASE}/web/publicaciones-procesales/inicio` +
       `?p_p_id=${PORTLET}` +
       `&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view` +
@@ -339,12 +351,17 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
     // Tokens para identificar el radicado correcto entre varios resultados
+    // El portal muestra el número de proceso como "202300682" (año + consec sin ceros iniciales pero con padding propio)
+    // Generamos variantes para cubrir distintos formatos posibles
     const tokensEnBusq = [
-      r,
-      anioRad + consecRad,
-      anioRad + "0" + consecInt,
-      anioRad + "00" + consecInt,
-      anioRad + consecInt,
+      r,                              // radicado completo
+      anioRad + consecRad,            // "202300068" (con ceros)
+      anioRad + consecInt,            // "202368"
+      anioRad + "0" + consecInt,      // "2023068"
+      anioRad + "00" + consecInt,     // "20230068"
+      anioRad + "000" + consecInt,    // "202300068"
+      consecRad,                      // "00068"
+      consecInt,                      // "68"
     ];
 
     let articleId = articleIdCapturado || null;
