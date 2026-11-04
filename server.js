@@ -72,8 +72,9 @@ async function enviarArchivo(telefono, buffer, filename, caption) {
 function tieneMicrositio(act) {
   if (!act) return false;
   const tip = (act.actuacion || "").toLowerCase();
-  // Solo hay documento publicado en el micrositio cuando es "Fijacion estado"
-  return tip.includes("fijacion estado") || tip.includes("fijación estado");
+  // Hay documento publicado en el micrositio para "Fijacion estado" Y "Notificacion por Estado"
+  return tip.includes("fijacion estado") || tip.includes("fijación estado")
+      || tip.includes("notificacion por estado") || tip.includes("notificación por estado");
 }
 
 function parsearRadicado(radicado) {
@@ -206,11 +207,52 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     const homeResp = await axios.get(`${BASE}/web/publicaciones-procesales/inicio`, {
       headers: HEADERS, timeout: 25000, maxRedirects: 5, validateStatus: () => true,
     });
-    const cookieStr = (homeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
+    // Cookie mutable para poder actualizar durante el cascade
+    let cookieStr = (homeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
     console.log(`[micrositio] cookies: ${cookieStr.substring(0, 80)}`);
 
+    // ── PASO 1b: Cascade lifecycle=2 — simula la selección de filtros en cascada ──
+    // El portal Liferay requiere activar cada filtro vía p_p_lifecycle=2 para que la sesión
+    // quede configurada y el BUSCAR final devuelva artículos (no solo chips de categoría).
+    // Confirmado por captura de red del browser al usar el micrositio manualmente.
+    const cascadeSteps = [
+      { tipoFiltro: "departamento", idFiltro: idDepto,     id: "undefined" },
+      { tipoFiltro: "municipio",    idFiltro: idMuni,       id: "undefined" },
+      { tipoFiltro: "entidad",      idFiltro: idEntidad,    id: "undefined" },
+      { tipoFiltro: "despacho",     idFiltro: idDespacho,   id: "undefined" },
+    ];
+    for (const step of cascadeSteps) {
+      const cascadeParams = new URLSearchParams({
+        "p_p_id": PORTLET,
+        "p_p_lifecycle": "2",
+        "p_p_state": "normal",
+        "p_p_mode": "view",
+        "p_p_cacheability": "cacheLevelPage?",
+        [`${P}_tipoFiltro`]: step.tipoFiltro,
+        [`${P}_idFiltro`]:   step.idFiltro,
+        [`${P}_id`]:         step.id,
+      });
+      const cascadeUrl = `${BASE}/web/publicaciones-procesales/inicio?${cascadeParams.toString()}`;
+      console.log(`[micrositio] cascade ${step.tipoFiltro}=${step.idFiltro}`);
+      const cascadeResp = await axios.get(cascadeUrl, {
+        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": `${BASE}/web/publicaciones-procesales/inicio` },
+        timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+      });
+      // Actualizar cookies si el servidor las renueva
+      const newCookies = (cascadeResp.headers["set-cookie"] || []).map(c => c.split(";")[0]);
+      if (newCookies.length > 0) {
+        const existing = cookieStr.split("; ").reduce((m, c) => { const [k] = c.split("="); m[k] = c; return m; }, {});
+        newCookies.forEach(c => { const [k] = c.split("="); existing[k] = c; });
+        cookieStr = Object.values(existing).join("; ");
+      }
+      console.log(`[micrositio] cascade ${step.tipoFiltro} status=${cascadeResp.status} bytes=${String(cascadeResp.data||"").length}`);
+      // El portal es lento — pequeña pausa entre steps
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
     // ── PASO 2: GET búsqueda con los filtros correctos (URL confirmada por Network capture) ──
-    // action=busqueda con idDepto, idMuni, idEntidad, idEspecialidad, idDespacho, fechaInicio, fechaFin
+    // Después del cascade, action=busqueda devuelve artículos (no solo chips de categoría).
+    // verTotales=true para que devuelva todos los artículos del despacho en el rango de fechas.
     const params = new URLSearchParams({
       "p_p_id": PORTLET,
       "p_p_lifecycle": "0",
@@ -224,7 +266,7 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
       [`${P}_idEntidad`]: idEntidad,
       [`${P}_idEspecialidad`]: idEspecialidad,
       [`${P}_idDespacho`]: idDespacho,
-      [`${P}_verTotales`]: "false",
+      [`${P}_verTotales`]: "true",
     });
 
     const busqUrl = `${BASE}/web/publicaciones-procesales/inicio?${params.toString()}`;
@@ -250,41 +292,11 @@ async function capturarScreenshotMicrositio(radicado, idRegActuacion, fechaActua
     console.log(`[micrositio] articleIds encontrados: ${articleIds.join(", ") || "ninguno"}`);
 
     if (articleIds.length === 0) {
-      // El portal devuelve categorías en el primer paso, no artículos directamente.
-      // Segundo paso: llamar action=filterStructures con idStructure=6098973 (Fijaciones/Estados)
-      console.log(`[micrositio] Sin articleIds en busqueda — intentando filterStructures`);
-      const params2 = new URLSearchParams({
-        "p_p_id": PORTLET,
-        "p_p_lifecycle": "0",
-        "p_p_state": "normal",
-        "p_p_mode": "view",
-        [`${P}_action`]: "filterStructures",
-        [`${P}_idStructure`]: "6098973",
-        [`${P}_fechaInicio`]: fmt(fInicio),
-        [`${P}_fechaFin`]: fmt(fFin),
-        [`${P}_idDepto`]: " ",
-        [`${P}_idDespacho`]: idDespacho,
-        [`${P}_verTotales`]: "true",
-        [`${P}_cur`]: "1",
-      });
-      const filterUrl = `${BASE}/web/publicaciones-procesales/inicio?${params2.toString()}`;
-      console.log(`[micrositio] GET filterStructures: ${filterUrl.substring(0, 200)}`);
-      const filterResp = await axios.get(filterUrl, {
-        headers: { ...HEADERS, "Cookie": cookieStr, "Referer": busqUrl },
-        timeout: 30000, maxRedirects: 5, validateStatus: () => true,
-      });
-      const htmlFilter = filterResp.data || "";
-      console.log(`[micrositio] filterStructures status=${filterResp.status} bytes=${htmlFilter.length}`);
-      while ((ma = reArt.exec(htmlFilter)) !== null) {
-        if (!articleIds.includes(ma[1])) articleIds.push(ma[1]);
-      }
-      console.log(`[micrositio] articleIds tras filterStructures: ${articleIds.join(", ") || "ninguno"}`);
-      if (articleIds.length === 0) {
-        console.log(`[micrositio] HTML filterStructures[0-1000]: ${htmlFilter.substring(0, 1000)}`);
-        return null;
-      }
-      // Usar htmlFilter como fuente para el matching de radicado en los pasos siguientes
-      htmlBusq = htmlFilter;
+      // El cascade lifecycle=2 debería haber establecido la sesión para que BUSCAR devuelva artículos.
+      // Si llegamos aquí es porque el portal no devolvió resultados (sin publicaciones en ese rango,
+      // o el portal está caído/lento). Loguear el HTML para diagnóstico.
+      console.log(`[micrositio] Sin articleIds tras cascade+busqueda — HTML[0-1000]: ${htmlBusq.substring(0, 1000)}`);
+      return null;
     }
 
     // ── PASO 3: identificar el articleId del proceso en el HTML de resultados ──
